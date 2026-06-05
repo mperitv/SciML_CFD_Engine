@@ -18,7 +18,7 @@ class PINN3DEngine(nn.Module):
         
         for _ in range(num_layers):
             layers.append(nn.Linear(in_dim, hidden_dim))
-            layers.append(nn.Tanh())
+            layers.append(nn.SiLU())
             in_dim = hidden_dim
             
         layers.append(nn.Linear(hidden_dim, 4)) # Çıkış: u, v, w, p

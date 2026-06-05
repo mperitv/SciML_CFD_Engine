@@ -41,7 +41,9 @@ def main():
     
     # 2. Initialize Core Modules
     model = PINN3DEngine(hidden_dim=256, num_layers=6).to(device)
-    physics = NavierStokes3DPhysics(Re=REYNOLDS_NUMBER)
+    spatial_weight_start = float(os.environ.get('SPATIAL_WEIGHT_START', '1.0'))
+    spatial_weight_slope = float(os.environ.get('SPATIAL_WEIGHT_SLOPE', '1.0'))
+    physics = NavierStokes3DPhysics(Re=REYNOLDS_NUMBER, spatial_weight_start=spatial_weight_start, spatial_weight_slope=spatial_weight_slope)
     geometry = PipeGeometrySampler(radius=float(os.environ.get('RADIUS', '0.5')), length=float(os.environ.get('LENGTH', '3.0')))
 
     # 3. Setup Trainer
@@ -58,6 +60,9 @@ def main():
         ntk_reg_weight=NTK_REG_WEIGHT,
         lambda_pin=LAMBDA_PIN,
         lambda_pos=LAMBDA_POS,
+        pump_force_max=float(os.environ.get('PUMP_FORCE_MAX', '0.1')),
+        pump_ramp_epochs=int(os.environ.get('PUMP_RAMP_EPOCHS', '200')),
+        run_id=os.environ.get('RUN_ID', None),
     )
 
     # 4. Execute Training (Adam ile kaba taslak, L-BFGS ile pürüzsüzleştirme)
@@ -71,7 +76,9 @@ def main():
 
     # 5. Save Model Checkpoint
     os.makedirs("checkpoints", exist_ok=True)
-    save_path = "checkpoints/pipe_flow_model.pth"
+    run_id = os.environ.get('RUN_ID', '')
+    suffix = f"_{run_id}" if run_id else ""
+    save_path = f"checkpoints/pipe_flow_model{suffix}.pth"
     torch.save(model.state_dict(), save_path)
     logger.info(f"Model weights saved to {save_path}")
 

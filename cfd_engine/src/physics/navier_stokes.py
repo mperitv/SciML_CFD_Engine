@@ -18,9 +18,14 @@ class NavierStokes3DPhysics:
     kavramlardır, ancak eğitim sırasında loss → ∇_θ R_θ zinciri kopmamalıdır.
     """
 
-    def __init__(self, Re: float):
+    def __init__(self, Re: float, spatial_weight_start: float = 1.0, spatial_weight_slope: float = 1.0, artificial_pressure_gradient: float = 0.0):
         self.Re = Re
         self.nu = 1.0 / Re
+        # Spatial weighting for curriculum learning (weights applied to PDE residuals)
+        self.spatial_weight_start = spatial_weight_start
+        self.spatial_weight_slope = spatial_weight_slope
+        # Small artificial pressure gradient (dP/dx) to bias flow towards +x during curriculum
+        self.artificial_pressure_gradient = artificial_pressure_gradient
 
     def _ensure_differentiable_coords(self, coords: torch.Tensor) -> torch.Tensor:
         if not coords.requires_grad:
@@ -76,17 +81,30 @@ class NavierStokes3DPhysics:
         laplacian_w = w_xx + w_yy + w_zz
 
         continuity = u_x + v_y + w_z
-        momentum_x = (u * u_x + v * u_y + w * u_z) + p_x - self.nu * laplacian_u
+        # Apply a small artificial pressure gradient (acts like a body force) to push flow downstream
+        # Note: momentum equation includes +p_x term; subtracting artificial_pressure_gradient biases rightward flow
+        momentum_x = (u * u_x + v * u_y + w * u_z) + p_x - self.nu * laplacian_u - self.artificial_pressure_gradient
         momentum_y = (u * v_x + v * v_y + w * v_z) + p_y - self.nu * laplacian_v
         momentum_z = (u * w_x + v * w_y + w * w_z) + p_z - self.nu * laplacian_w
 
         return continuity, momentum_x, momentum_y, momentum_z, preds
 
     def compute_pde_loss(self, model: nn.Module, coords: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """PDE rezidüellerinin MSE kaybı."""
+        """PDE rezidüellerinin MSE kaybı.
+
+        Applies a spatial weighting mask that increases the PDE penalty for points downstream
+        (x > spatial_weight_start) according to spatial_weight_slope. This implements a
+        simple curriculum that focuses the optimizer on later sections of the pipe.
+        """
         continuity, momentum_x, momentum_y, momentum_z, _ = self.compute_pde_residuals(model, coords)
-        loss_cont = torch.mean(continuity ** 2)
-        loss_mom = torch.mean(momentum_x ** 2 + momentum_y ** 2 + momentum_z ** 2)
+
+        # Spatial weighting based on X coordinate
+        x = coords[:, 0:1]
+        # weight = 1 + slope * max(0, x - start)
+        weight = 1.0 + self.spatial_weight_slope * torch.clamp((x - float(self.spatial_weight_start)), min=0.0)
+
+        loss_cont = torch.mean(weight * (continuity ** 2))
+        loss_mom = torch.mean(weight * (momentum_x ** 2 + momentum_y ** 2 + momentum_z ** 2))
         return loss_cont, loss_mom
 
     def _param_jacobian_row(

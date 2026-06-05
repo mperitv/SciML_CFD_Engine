@@ -28,6 +28,9 @@ class PINNTrainer:
         ntk_reg_weight: float = 1e-4,
         lambda_pin: float = 1.0,
         lambda_pos: float = 10.0,
+        pump_force_max: float = 0.1,
+        pump_ramp_epochs: int = 200,
+        run_id: Optional[str] = None,
     ):
         self.model = model
         self.physics = physics_engine
@@ -43,6 +46,9 @@ class PINNTrainer:
         self.ntk_reg_weight = ntk_reg_weight
         self.lambda_pin = lambda_pin
         self.lambda_pos = lambda_pos
+        self.pump_force_max = pump_force_max
+        self.pump_ramp_epochs = pump_ramp_epochs
+        self.run_id = run_id if run_id is not None else ""
 
     def train(self, adam_epochs: int, lbfgs_epochs: int, batch_size_interior: int = 2000, batch_size_boundary: int = 500) -> Dict[str, list]:
         self.model.train()
@@ -54,6 +60,10 @@ class PINNTrainer:
         logger.info(f"--- STAGE 1: Adam Optimization ({adam_epochs} Epochs) ---")
         for epoch in range(1, adam_epochs + 1):
             self.adam_optimizer.zero_grad()
+
+            # Curriculum: ramp the artificial downstream pressure gradient (pump) slowly
+            ramp_frac = min(1.0, epoch / max(1, self.pump_ramp_epochs))
+            self.physics.artificial_pressure_gradient = float(self.pump_force_max * ramp_frac)
 
             interior_pts = self.geometry.sample_interior(batch_size_interior, self.device)
             wall_pts = self.geometry.sample_walls(batch_size_boundary, self.device)
@@ -88,7 +98,7 @@ class PINNTrainer:
             pde_loss = (loss_cont + loss_mom)
             bc_loss = (loss_wall + loss_inlet + self.lambda_pin * loss_pin + self.lambda_pos * loss_pos)
 
-            # Dynamic weight balancing via gradient norms (make BC gradients comparable to PDE)
+            # Dynamic weight balancing via gradient norms — more aggressive: amplify PDE when BC dominates
             params = [p for p in self.model.parameters() if p.requires_grad]
             eps = 1e-12
             try:
@@ -101,9 +111,12 @@ class PINNTrainer:
                 norm_pde = torch.tensor(1.0, device=self.device)
                 norm_bc = torch.tensor(1.0, device=self.device)
 
-            weight_bc = (norm_pde.detach() / (norm_bc.detach() + eps)).clamp(0.1, 10.0)
+            # Compute PDE amplification weight: if BC gradients >> PDE gradients, increase PDE weight
+            weight_pde_val = (norm_bc.detach() / (norm_pde.detach() + eps)).clamp(0.1, 100.0)
+            # Be slightly aggressive (exponent) to favor PDE when needed
+            weight_pde = weight_pde_val ** 1.5
 
-            total_loss = pde_loss + self.lambda_bc * weight_bc * bc_loss
+            total_loss = weight_pde * pde_loss + self.lambda_bc * bc_loss
 
             # NTK regularizer occasionally (cheap small sample)
             ntk_reg = 0.0
@@ -121,6 +134,10 @@ class PINNTrainer:
             if isinstance(ntk_reg, float):
                 total_loss = total_loss + ntk_reg
 
+            # Logging pump force and dynamic weight occasionally
+            if epoch % 100 == 0:
+                logger.debug(f"Epoch {epoch}: pump_force={self.physics.artificial_pressure_gradient:.5e}, weight_pde={weight_pde:.3f}")
+
             total_loss.backward()
             if self.grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
@@ -136,7 +153,8 @@ class PINNTrainer:
             # --- AUTO-SAVE BLOCK ---
             if epoch % 500 == 0:
                 os.makedirs("checkpoints", exist_ok=True)
-                save_path = f"checkpoints/auto_ckpt_epoch_{epoch}.pth"
+                suffix = f"_{self.run_id}" if self.run_id else ""
+                save_path = f"checkpoints/auto_ckpt_epoch_{epoch}{suffix}.pth"
                 torch.save(self.model.state_dict(), save_path)
                 logger.info(f"Checkpoint saved at epoch {epoch}: {save_path}")
 
@@ -219,9 +237,10 @@ class PINNTrainer:
                     norm_pde = torch.tensor(1.0, device=self.device)
                     norm_bc = torch.tensor(1.0, device=self.device)
 
-                weight_bc = (norm_pde.detach() / (norm_bc.detach() + eps)).clamp(0.1, 10.0)
+                weight_pde_val = (norm_bc.detach() / (norm_pde.detach() + eps)).clamp(0.1, 100.0)
+                weight_pde = weight_pde_val ** 1.5
 
-                total_loss = pde_loss + self.lambda_bc * weight_bc * bc_loss
+                total_loss = weight_pde * pde_loss + self.lambda_bc * bc_loss
 
                 # small NTK regularizer during L-BFGS closure
                 try:
