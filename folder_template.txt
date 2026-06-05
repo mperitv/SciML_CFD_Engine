@@ -1,0 +1,21 @@
+SciML_CFD_Engine/
+│
+├── src/                          # Tüm çekirdek motor kodlarımız burada olacak
+│   ├── __init__.py
+│   ├── models/                   # Yapay zeka mimarileri
+│   │   ├── __init__.py
+│   │   ├── embeddings.py         # MultiScaleFourierEmbedding sınıfını buraya koy
+│   │   └── networks.py           # PINN3DEngine sınıfını buraya koy
+│   │
+│   ├── physics/                  # Fizik ve denklemler
+│   │   ├── __init__.py
+│   │   └── navier_stokes.py      # NavierStokes3DPhysics sınıfını buraya koy
+│   │
+│   └── geometry/                 # Yol haritası Aşama-1'de burayı dolduracağız (SDF, CAD)
+│       └── __init__.py
+│
+├── tests/                        # Kodların çalışıp çalışmadığını test ettiğimiz yer
+│   └── test_basic_flow.py        # Sana verdiğim "if __name__ == '__main__':" bloğunu buraya koy
+│
+├── requirements.txt              # Projenin kütüphane bağımlılıkları
+└── README.md                     # Projenin vizyonu ve çalıştırma talimatları
