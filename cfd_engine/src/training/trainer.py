@@ -30,6 +30,8 @@ class PINNTrainer:
         lambda_pos: float = 10.0,
         lambda_target_vel: float = 1000.0,
         lambda_inlet: float = 100.0,
+        lambda_cont: float = 1.5,
+        lambda_mom: float = 1.5,
         inlet_velocity: float = 1.0,
         pump_force_max: float = 0.1,
         pump_ramp_epochs: int = 200,
@@ -51,19 +53,25 @@ class PINNTrainer:
         self.lambda_pos = lambda_pos
         self.lambda_target_vel = lambda_target_vel
         self.lambda_inlet = lambda_inlet
+        self.lambda_cont = lambda_cont
+        self.lambda_mom = lambda_mom
         self.pump_force_max = pump_force_max
         self.pump_ramp_epochs = pump_ramp_epochs
         self.run_id = run_id if run_id is not None else ""
 
-    def _compute_centerline_target_loss(self, model: nn.Module, num_points: int) -> torch.Tensor:
+    def _compute_center_band_target_loss(self, model: nn.Module, num_points: int) -> torch.Tensor:
         L = getattr(self.geometry, 'length', 1.0)
-        x_center = torch.rand((num_points, 1), device=self.device) * float(L)
-        y_center = torch.zeros_like(x_center)
-        z_center = torch.zeros_like(x_center)
-        centerline_coords = torch.cat([x_center, y_center, z_center], dim=1)
-        preds_centerline = model(centerline_coords)
-        u_center = preds_centerline[:, 0:1]
-        loss_target = torch.mean(torch.relu(1.0 - u_center) ** 2)
+        R = getattr(self.geometry, 'radius', 1.0)
+        x_band = torch.rand((num_points, 1), device=self.device) * float(L)
+        y_band = (torch.rand((num_points, 1), device=self.device) - 0.5) * 0.4
+        z_band = torch.zeros_like(y_band)
+        band_coords = torch.cat([x_band, y_band, z_band], dim=1)
+
+        preds_band = model(band_coords)
+        u_band = preds_band[:, 0:1]
+        u_target = self.inlet_velocity * torch.clamp(1.0 - (y_band / R) ** 2, min=0.0)
+
+        loss_target = torch.mean((u_band - u_target) ** 2)
         return loss_target
 
     def train(self, adam_epochs: int, lbfgs_epochs: int, batch_size_interior: int = 2000, batch_size_boundary: int = 500) -> Dict[str, list]:
@@ -110,9 +118,9 @@ class PINNTrainer:
 
             loss_pin = self.physics.compute_pressure_pinning(self.model, outlet_pts, p_ref=0.0)
             loss_pos = self.physics.compute_positivity_loss(self.model, interior_pts)
-            loss_target = self._compute_centerline_target_loss(self.model, batch_size_boundary)
+            loss_target = self._compute_center_band_target_loss(self.model, batch_size_boundary)
 
-            pde_loss = (loss_cont + loss_mom)
+            pde_loss = self.lambda_cont * loss_cont + self.lambda_mom * loss_mom
             bc_loss = (loss_wall + loss_inlet + self.lambda_pin * loss_pin + self.lambda_pos * loss_pos)
 
             # Dynamic weight balancing via gradient norms — more aggressive: amplify PDE when BC dominates
@@ -200,11 +208,12 @@ class PINNTrainer:
         logger.info(f"--- STAGE 2: L-BFGS Optimization (Max {lbfgs_epochs} Iterations) ---")
         
         lbfgs_optimizer = torch.optim.LBFGS(
-            self.model.parameters(), 
-            max_iter=2000, 
-            tolerance_grad=1e-6, 
-            tolerance_change=1e-12, 
-            history_size=50
+            self.model.parameters(),
+            max_iter=max(200, lbfgs_epochs),
+            tolerance_grad=1e-6,
+            tolerance_change=1e-12,
+            history_size=50,
+            line_search_fn='strong_wolfe',
         )
 
         # Noktaları bir kez üretiyoruz
@@ -245,9 +254,9 @@ class PINNTrainer:
 
                 loss_pin = self.physics.compute_pressure_pinning(self.model, outlet_pts, p_ref=0.0)
                 loss_pos = self.physics.compute_positivity_loss(self.model, curr_interior)
-                loss_target = self._compute_centerline_target_loss(self.model, curr_inlet.shape[0])
+                loss_target = self._compute_center_band_target_loss(self.model, curr_inlet.shape[0])
 
-                pde_loss = (loss_cont + loss_mom)
+                pde_loss = self.lambda_cont * loss_cont + self.lambda_mom * loss_mom
                 bc_loss = (loss_wall + loss_inlet + self.lambda_pin * loss_pin + self.lambda_pos * loss_pos)
 
                 params = [p for p in self.model.parameters() if p.requires_grad]
