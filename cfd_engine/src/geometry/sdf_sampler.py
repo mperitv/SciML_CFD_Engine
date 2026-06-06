@@ -25,6 +25,20 @@ class PipeGeometrySampler:
         coords.requires_grad_(True)
         return coords
 
+    def sample_outlet(self, num_points: int, device: torch.device) -> torch.Tensor:
+        """Generates points at the outlet boundary (x = length)."""
+        x = torch.full((num_points, 1), self.length, device=device)
+        
+        r = torch.sqrt(torch.rand((num_points, 1), device=device)) * self.radius
+        theta = torch.rand((num_points, 1), device=device) * 2.0 * math.pi
+        
+        y = r * torch.cos(theta)
+        z = r * torch.sin(theta)
+        
+        coords = torch.cat([x, y, z], dim=1)
+        coords.requires_grad_(True)
+        return coords
+
     def sample_walls(self, num_points: int, device: torch.device) -> torch.Tensor:
         """Generates points on the outer wall surface for No-Slip boundary conditions."""
         x = torch.rand((num_points, 1), device=device) * self.length

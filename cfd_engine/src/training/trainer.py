@@ -41,6 +41,34 @@ class PINNTrainer:
         u_pred = preds_int[:, 0:1]
         return torch.mean((u_pred - expected_u)**2)
 
+    def _compute_axial_smoothness_loss(self, int_pts):
+        """
+        Penalizes sudden changes in du/dx (axial velocity gradient).
+        This removes vertical aliasing artifacts in the visualization.
+        """
+        int_pts_req = int_pts.clone().detach().requires_grad_(True)
+        preds = self.model(int_pts_req)
+        u_pred = preds[:, 0:1]
+        
+        # Compute du/dx using autograd
+        du_dx = torch.autograd.grad(
+            outputs=u_pred.sum(),
+            inputs=int_pts_req,
+            create_graph=True,
+            retain_graph=True,
+        )[0][:, 0:1]
+        
+        # Penalize spatial variations of du/dx (d²u/dx²)
+        du_dx_sum = du_dx.sum()
+        d2u_dx2 = torch.autograd.grad(
+            outputs=du_dx_sum,
+            inputs=int_pts_req,
+            create_graph=False,
+            retain_graph=True,
+        )[0][:, 0:1]
+        
+        return torch.mean(d2u_dx2**2)
+
     def train(
         self,
         adam_epochs: int,
@@ -69,14 +97,15 @@ class PINNTrainer:
             preds_int = self.model(int_pts)
             l_pos = torch.mean(torch.relu(-preds_int[:, 0:1]))
             l_radial = self._compute_radial_guide_loss(preds_int, int_pts)
+            l_smooth = self._compute_axial_smoothness_loss(int_pts)
 
             # 3. Sınır Koşulları (BC)
             l_wall = torch.mean(self.model(bc_pts)[:, 0:3]**2)
             l_in = self._compute_inlet_loss(self.model(in_pts), in_pts)
             l_out = torch.mean(self.model(out_pts)[:, 3:4]**2)
             
-            # TOTAL LOSS: Radyal kılavuzu 1000 çarpanıyla dayatıyoruz!
-            total_loss = pde_loss + (1000.0 * l_radial) + (500.0 * l_pos) + self.lambda_bc * (l_wall + l_in + l_out)
+            # TOTAL LOSS: Radyal kılavuzu + Smoothing + Pozitiflik cezaları
+            total_loss = pde_loss + (1000.0 * l_radial) + (500.0 * l_pos) + (100.0 * l_smooth) + self.lambda_bc * (l_wall + l_in + l_out)
             
             total_loss.backward()
             self.adam_optimizer.step()
@@ -110,12 +139,13 @@ class PINNTrainer:
                 preds_int = self.model(c_int)
                 l_pos = torch.mean(torch.relu(-preds_int[:, 0:1]))
                 l_radial = self._compute_radial_guide_loss(preds_int, c_int)
+                l_smooth = self._compute_axial_smoothness_loss(c_int)
                 
                 l_wall = torch.mean(self.model(c_bc)[:, 0:3]**2)
                 l_in = self._compute_inlet_loss(self.model(c_in), c_in)
                 l_out = torch.mean(self.model(c_out)[:, 3:4]**2)
                 
-                total = pde_loss + (1000.0 * l_radial) + (500.0 * l_pos) + self.lambda_bc * (l_wall + l_in + l_out)
+                total = pde_loss + (1000.0 * l_radial) + (500.0 * l_pos) + (100.0 * l_smooth) + self.lambda_bc * (l_wall + l_in + l_out)
                 total.backward()
                 return total
 
