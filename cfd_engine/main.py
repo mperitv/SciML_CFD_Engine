@@ -101,8 +101,8 @@ def run_simulation(
     history = trainer.train(
         adam_epochs=adam_epochs,
         lbfgs_epochs=lbfgs_epochs,
-        batch_size_interior=batch_interior,
-        batch_size_boundary=batch_boundary,
+        batch_size_int=batch_interior,
+        batch_size_bc=batch_boundary,
     )
 
     output_path = Path(output_dir)
@@ -180,8 +180,8 @@ def main():
     history = trainer.train(
         adam_epochs=ADAM_EPOCHS,     # Adam epochs
         lbfgs_epochs=LBFGS_EPOCHS,     # L-BFGS iterations
-        batch_size_interior=BATCH_INTERIOR,
-        batch_size_boundary=BATCH_BOUNDARY,
+        batch_size_int=BATCH_INTERIOR,
+        batch_size_bc=BATCH_BOUNDARY,
     )
 
     # 5. Save Model Checkpoint
