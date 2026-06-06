@@ -57,17 +57,6 @@ def build_simulation_components(
         device=device,
         lr=float(os.environ.get('LR', '1e-3')),
         lambda_bc=float(os.environ.get('LAMBDA_BC', '10000.0')),
-        inlet_velocity=float(inlet_velocity),
-        lambda_target_vel=float(os.environ.get('LAMBDA_TARGET_VEL', '1000.0')),
-        lambda_inlet=float(os.environ.get('LAMBDA_INLET', '100.0')),
-        log_dir=log_dir,
-        ntk_check_interval=int(os.environ.get('NTK_CHECK_INTERVAL', '1000')),
-        ntk_reg_weight=float(os.environ.get('NTK_REG_WEIGHT', '1e-4')),
-        lambda_pin=float(os.environ.get('LAMBDA_PIN', '1.0')),
-        lambda_pos=float(os.environ.get('LAMBDA_POS', '10.0')),
-        pump_force_max=float(os.environ.get('PUMP_FORCE_MAX', '1.0')),
-        pump_ramp_epochs=int(os.environ.get('PUMP_RAMP_EPOCHS', '200')),
-        run_id=run_id,
     )
     visualizer = CFDVisualizer(model, device)
 
@@ -184,17 +173,6 @@ def main():
         device=device,
         lr=float(os.environ.get('LR', '1e-3')),
         lambda_bc=LAMBDA_BC,
-        inlet_velocity=INLET_VELOCITY,
-        lambda_target_vel=LAMBDA_TARGET_VEL,
-        lambda_inlet=LAMBDA_INLET,
-        log_dir=log_dir,
-        ntk_check_interval=int(os.environ.get('NTK_CHECK_INTERVAL', '1000')),
-        ntk_reg_weight=NTK_REG_WEIGHT,
-        lambda_pin=LAMBDA_PIN,
-        lambda_pos=LAMBDA_POS,
-        pump_force_max=float(os.environ.get('PUMP_FORCE_MAX', '1.0')),
-        pump_ramp_epochs=int(os.environ.get('PUMP_RAMP_EPOCHS', '200')),
-        run_id=os.environ.get('RUN_ID', None),
     )
 
     # 4. Execute Training (Adam ile kaba taslak, L-BFGS ile pürüzsüzleştirme)
