@@ -9,25 +9,35 @@ from typing import Dict, Tuple
 
 logger = logging.getLogger(__name__)
 
+
 class PINNTrainer:
     """
-    Production-grade PINN Trainer for 3D pipe flow with spatial aliasing suppression.
-    
-    Two-stage optimization pipeline:
-    1. Adam with CosineAnnealingLR scheduler for coarse fit
-    2. L-BFGS with ultra-tight tolerances for fine refinement
-    
-    Loss architecture (Golden Ratio Tuning — Dikey Çizgi Bastırma):
-      pde_loss  = 100 × l_cont + 100 × l_mom   ← momentum 100× spatial aliasing'i yok eder
-      total     = pde_loss
-                + 20.0  × l_radial              ← parabolün doğal oluşması için gevşetildi
-                + 500.0 × l_pos                 ← u_x ≥ 0 güvencesi
-                + 5.0   × l_smooth              ← du/dx L2 normu (eksenel pürüzsüzlük)
-                + λ_bc  × (l_wall + l_in + l_out)
-    
-    NTK Spektrum Bağlantısı (Makale Bölüm 3.1):
-    - Momentum ağırlığı 100× → yüksek-frekanslı mod bastırması = NTK koşul sayısını düşürür
-    - du/dx L2 normu → tam gelişmiş akışın fiziksel kısıtı (Poiseuille: du/dx = 0)
+    Analytical Pressure Coupling + Physics PINN Trainer — 3D boru akisi cozucu.
+
+    TEMEL PARADOKS VE COZUMU:
+      Klasik warm-up: ag hizi parabol olarak ogrenirken basinci sifir ogrenir.
+      Fizik acildiginda momentum_x = ... + p_x - nu*lap_u - driving_force
+      denkleminde p_x=0 ile driving_force arasinda acik kalir → sonumlenme.
+
+      COZUM — Analytical Pressure Coupling:
+        Warm-up'ta hem hiz hem de basincin analitik degerleri agretilir:
+          u_exact = 2 * relu(1 - (y^2+z^2)/R^2)   (Poiseuille)
+          p_exact = p_coeff * (L - x)               (Hagen-Poiseuille)
+          p_coeff = 8 * nu / R^2
+        warmup_loss = MSE(u_pred, u_exact) + MSE(p_pred, p_exact)
+
+    UC ASAMA:
+      STAGE 0  Warm-Up     — analitik u+p kilidi (PDE yok)
+      STAGE 1  Physics     — N-S + BC, PDE=10x, BC dinamik grad-norm
+      STAGE 2  L-BFGS      — ince ayar, Stage 1 agirliklarini kullanir
+
+    LOSS FORMULASYONU (Physics Fazinda):
+      total = 10.0 * pde
+            +  1.0 * radial
+            + 10.0 * positivity
+            +  1.0 * smooth
+            + w_bc * lambda_bc * (wall + inlet + outlet)
+      w_bc: her 20 epochta grad-norm ile otomatik guncellenir
     """
 
     def __init__(
@@ -37,353 +47,462 @@ class PINNTrainer:
         geometry_sampler,
         device: torch.device,
         lr: float = 1e-3,
-        lambda_bc: float = 15000.0,
+        lambda_bc: float = 5000.0,
     ):
         self.model = model
         self.physics = physics_engine
         self.geometry = geometry_sampler
         self.device = device
         self.lambda_bc = lambda_bc
+        self._init_lr = lr
 
-        # Adam optimizer with CosineAnnealingLR scheduler
         self.adam_optimizer = optim.Adam(self.model.parameters(), lr=lr)
-        # Scheduler will be created in train() method
         self.scheduler = None
 
-        # Training history tracking
-        self.loss_history = {
+        # Dinamik grad-norm agirlandirma (sadece BC icin; PDE 10x sabit)
+        self._dyn_w_bc:     float = 1.0
+        self._grad_ema_pde: float = 1.0
+        self._grad_ema_bc:  float = 1.0
+
+        self.loss_history: Dict[str, list] = {
+            'warmup': [],
             'total': [], 'pde': [], 'radial': [], 'positivity': [],
-            'smoothness': [], 'boundary': [], 'continuity': [], 'momentum': []
+            'smoothness': [], 'boundary': [], 'continuity': [], 'momentum': [],
         }
 
-    def _compute_inlet_loss(self, preds_inlet: torch.Tensor, inlet_pts: torch.Tensor) -> torch.Tensor:
+    # =========================================================================
+    # ANALYTICAL SOLUTIONS
+    # =========================================================================
+
+    def _compute_exact_velocity(self, pts: torch.Tensor) -> torch.Tensor:
         """
-        Enforces Poiseuille parabolic inlet profile: u(r) = 2(1 - r²/R²)
-        Also suppresses radial and axial velocities at inlet.
-        
-        Args:
-            preds_inlet: (N, 4) predictions [u_x, v_y, w_z, p]
-            inlet_pts: (N, 3) inlet points [x=0, y, z]
-        
-        Returns:
-            Scalar inlet boundary loss
+        Analitik Poiseuille hiz profili:
+          u_exact = 2 * relu(1 - (y^2+z^2) / R^2)
         """
-        y = inlet_pts[:, 1:2]
-        z = inlet_pts[:, 2:3]
-        r_squared = y**2 + z**2
-        R_max = self.geometry.radius ** 2
-        
-        # Parabolic profile: u = 2 * (1 - r²/R²)
-        parabolic_u = 2.0 * (1.0 - (r_squared / R_max))
-        parabolic_u = torch.relu(parabolic_u)  # Clamp negative (edge cases)
-        
+        y  = pts[:, 1:2]
+        z  = pts[:, 2:3]
+        R2 = self.geometry.radius ** 2
+        return 2.0 * torch.relu(1.0 - (y ** 2 + z ** 2) / R2)
+
+    def _compute_exact_pressure(self, pts: torch.Tensor) -> torch.Tensor:
+        """
+        Analitik Hagen-Poiseuille basinc profili:
+          p_exact = p_coeff * (L - x)
+          p_coeff = 8 * nu / R^2
+
+        Cikarim: dp/dx = nu * lap_u = (1/Re) * (-8/R^2) * u_max = -8*nu/R^2
+          => p(x) = (8*nu/R^2) * (L - x)  ile p(L)=0 (outlet BC)
+
+        Re=100, R=0.5 icin: p_coeff = 8/(100*0.25) = 0.32  (kullanici referansi)
+        Re=50,  R=0.5 icin: p_coeff = 8/(50*0.25)  = 0.64
+
+        .detach() ile koordinat gradyanlari hedef hesabina karistirilmaz.
+        """
+        x       = pts[:, 0:1].detach()
+        p_coeff = 8.0 * self.physics.nu / (self.geometry.radius ** 2)
+        return p_coeff * (self.geometry.length - x)
+
+    # =========================================================================
+    # DYNAMIC GRAD-NORM WEIGHTING (sadece BC icin)
+    # =========================================================================
+
+    def _update_grad_norms(
+        self,
+        pde_loss: torch.Tensor,
+        bc_raw:   torch.Tensor,
+        ema_alpha: float = 0.9,
+    ) -> float:
+        """
+        BC bileseninin dinamik agirligini hesaplar.
+        Hedef: PDE ve BC'nin efektif gradyan normlari esit olsun.
+
+        Son 2D parametre matrisini proxy olarak kullanir (hesap tasarrufu).
+        Sonuc w_bc [0.1, 20.0] araligina kirilir.
+        """
+        proxy = None
+        for p in reversed(list(self.model.parameters())):
+            if p.requires_grad and p.ndim == 2:
+                proxy = p
+                break
+
+        if proxy is None:
+            return self._dyn_w_bc
+
+        try:
+            g_pde = torch.autograd.grad(
+                pde_loss, proxy,
+                retain_graph=True, create_graph=False, allow_unused=True,
+            )[0]
+            g_bc = torch.autograd.grad(
+                bc_raw, proxy,
+                retain_graph=True, create_graph=False, allow_unused=True,
+            )[0]
+
+            g_pde_n = g_pde.detach().norm().item() if g_pde is not None else self._grad_ema_pde
+            g_bc_n  = g_bc.detach().norm().item()  if g_bc  is not None else self._grad_ema_bc
+
+        except RuntimeError as exc:
+            logger.debug(f"Grad-norm skipped: {exc}")
+            return self._dyn_w_bc
+
+        self._grad_ema_pde = ema_alpha * self._grad_ema_pde + (1.0 - ema_alpha) * g_pde_n
+        self._grad_ema_bc  = ema_alpha * self._grad_ema_bc  + (1.0 - ema_alpha) * g_bc_n
+
+        # w_bc: BC'nin efektif gradyan normu PDE'ye esit olsun
+        # Efektif PDE norm = 10.0 * ema_pde; Efektif BC norm = w_bc * ema_bc
+        # => w_bc = 10.0 * ema_pde / ema_bc
+        target = 10.0 * self._grad_ema_pde
+        w_bc   = float(min(max(target / (self._grad_ema_bc + 1e-8), 0.1), 20.0))
+
+        self._dyn_w_bc = w_bc
+        return w_bc
+
+    # =========================================================================
+    # BOUNDARY CONDITION LOSSES
+    # =========================================================================
+
+    def _compute_inlet_loss(
+        self, preds_inlet: torch.Tensor, inlet_pts: torch.Tensor
+    ) -> torch.Tensor:
+        """Poiseuille giris profili: u(r) = 2*(1-r^2/R^2), v=w=0."""
+        y  = inlet_pts[:, 1:2]
+        z  = inlet_pts[:, 2:3]
+        R2 = self.geometry.radius ** 2
+        u_target = 2.0 * torch.relu(1.0 - (y ** 2 + z ** 2) / R2)
         u_in = preds_inlet[:, 0:1]
         v_in = preds_inlet[:, 1:2]
         w_in = preds_inlet[:, 2:3]
-        
-        # u should match parabolic profile, v and w should be ~0
-        loss_u = torch.mean((u_in - parabolic_u) ** 2)
-        loss_transverse = torch.mean(v_in**2 + w_in**2)
-        
-        return loss_u + 0.1 * loss_transverse  # Transverse slightly less strict
+        return torch.mean((u_in - u_target) ** 2) + 0.1 * torch.mean(v_in ** 2 + w_in ** 2)
 
-    def _compute_radial_guide_loss(self, preds_int: torch.Tensor, int_pts: torch.Tensor) -> torch.Tensor:
-        """
-        Enforces radial velocity profile consistency throughout the domain.
-        
-        ARCHITECTURAL PRINCIPLE: The neural network tends to form a thin "needle" in the pipe center
-        (where it outputs high u values only at center, zero elsewhere) rather than the physical
-        parabolic profile u(r) = 2(1 - r²/R²). This loss guides all interior points toward the
-        parabolic profile regardless of axial position, preventing needle formation.
-        
-        Weight: λ_radial = 1000× (very strict, but essential for physical correctness)
-        
-        Args:
-            preds_int: (N, 4) predictions [u_x, v_y, w_z, p]
-            int_pts: (N, 3) interior points [x, y, z]
-        
-        Returns:
-            Scalar radial guide loss
-        """
-        y = int_pts[:, 1:2]
-        z = int_pts[:, 2:3]
-        r_squared = y**2 + z**2
-        R_max = self.geometry.radius ** 2
-        
-        # Target: Poiseuille parabolic profile everywhere
-        expected_u = 2.0 * (1.0 - (r_squared / R_max))
-        expected_u = torch.relu(expected_u)
-        
-        u_pred = preds_int[:, 0:1]
-        radial_loss = torch.mean((u_pred - expected_u) ** 2)
-        
-        return radial_loss
+    # =========================================================================
+    # INTERIOR REGULARISATION LOSSES
+    # =========================================================================
+
+    def _compute_radial_guide_loss(
+        self, preds_int: torch.Tensor, int_pts: torch.Tensor
+    ) -> torch.Tensor:
+        """Radyal kilavuz: ic noktalarda parabolik profili destekler."""
+        y  = int_pts[:, 1:2]
+        z  = int_pts[:, 2:3]
+        R2 = self.geometry.radius ** 2
+        u_target = 2.0 * torch.relu(1.0 - (y ** 2 + z ** 2) / R2)
+        return torch.mean((preds_int[:, 0:1] - u_target) ** 2)
 
     def _compute_axial_smoothness_loss(self, int_pts: torch.Tensor) -> torch.Tensor:
-        """
-        Axial Smoothness Loss: L2 normu of du/dx.
-
-        Tam gelişmiş Poiseuille akışında eksenel hız değişmez → du/dx = 0 everywhere.
-        mean((du/dx)^2) bu fiziksel kısıtı doğrudan uygular; görselleştirmedeki
-        dikey çizgi (spatial aliasing) artefaktlarını bastırır.
-
-        Weight: 5.0× (yeterli bastırma, radyal eğriyi kısıtlamadan)
-
-        Args:
-            int_pts: (N, 3) interior points [x, y, z]
-
-        Returns:
-            Scalar smoothness loss = mean((du/dx)^2)
-        """
-        int_pts_req = int_pts.clone().detach().requires_grad_(True)
-        preds = self.model(int_pts_req)
-        u_pred = preds[:, 0:1]
-
+        """Eksenel puruzsuzluk: mean((du/dx)^2). Tam gelismis akista du/dx=0."""
+        pts_req = int_pts.clone().detach().requires_grad_(True)
+        u_pred  = self.model(pts_req)[:, 0:1]
         try:
-            du_dx = torch.autograd.grad(
+            grad = torch.autograd.grad(
                 outputs=u_pred.sum(),
-                inputs=int_pts_req,
+                inputs=pts_req,
                 create_graph=True,
                 retain_graph=True,
                 allow_unused=True,
             )[0]
-
-            if du_dx is None:
-                return torch.tensor(0.0, device=self.device, dtype=torch.float32)
-
-            du_dx_x = du_dx[:, 0:1]  # d/dx bileşeni
-            smoothness_loss = torch.mean(du_dx_x ** 2)
-
+            if grad is None:
+                return torch.tensor(0.0, device=self.device)
+            return torch.mean(grad[:, 0:1] ** 2)
         except RuntimeError as e:
-            logger.warning(f"Gradient computation failed in axial smoothness loss: {e}")
-            return torch.tensor(0.0, device=self.device, dtype=torch.float32)
+            logger.warning(f"Smoothness grad failed: {e}")
+            return torch.tensor(0.0, device=self.device)
 
-        return smoothness_loss
+    # =========================================================================
+    # PHYSICS LOSS CALCULATOR
+    # =========================================================================
+
+    def _physics_loss(
+        self,
+        int_pts: torch.Tensor,
+        bc_pts:  torch.Tensor,
+        in_pts:  torch.Tensor,
+        out_pts: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        N-S + BC ham kayiplarini hesaplar.
+          'boundary' = lambda_bc * bc_raw  (agirlikli)
+          'bc_raw'   = wall + inlet + outlet  (grad-norm icin agirliksiz)
+          'total' anahtari YOK — _assemble_total ile dis hesaplanir.
+        """
+        l_cont, l_mom = self.physics.compute_pde_loss(self.model, int_pts)
+        pde_loss = l_cont + l_mom
+
+        preds_int  = self.model(int_pts)
+        l_pos      = torch.mean(torch.relu(-preds_int[:, 0:1]))
+        l_radial   = self._compute_radial_guide_loss(preds_int, int_pts)
+        l_smooth   = self._compute_axial_smoothness_loss(int_pts)
+
+        l_wall = torch.mean(self.model(bc_pts)[:, 0:3] ** 2)
+        l_in   = self._compute_inlet_loss(self.model(in_pts), in_pts)
+        l_out  = torch.mean(self.model(out_pts)[:, 3:4] ** 2)
+        bc_raw = l_wall + l_in + l_out
+        l_bc   = self.lambda_bc * bc_raw
+
+        return {
+            'pde':        pde_loss,
+            'continuity': l_cont,   'momentum':   l_mom,
+            'radial':     l_radial, 'positivity': l_pos,
+            'smoothness': l_smooth,
+            'boundary':   l_bc,     'bc_raw':     bc_raw,
+        }
+
+    def _assemble_total(
+        self,
+        losses: Dict[str, torch.Tensor],
+        w_bc: float,
+    ) -> torch.Tensor:
+        """
+        Kayiplari birlestirerek total_loss uretir.
+          PDE    : 10.0x sabit (fizik gucu yukseltildi)
+          BC     : w_bc dinamik (grad-norm ile otomatik denge)
+          Diger  : sabit katsayilar
+        """
+        return (
+            10.0 * losses['pde']
+            +  1.0 * losses['radial']
+            + 10.0 * losses['positivity']
+            +  1.0 * losses['smoothness']
+            + w_bc * losses['boundary']
+        )
+
+    # =========================================================================
+    # MAIN TRAINING ENTRY POINT
+    # =========================================================================
 
     def train(
         self,
-        adam_epochs: int = 1600,
-        lbfgs_epochs: int = 1500,
+        adam_epochs:    int = 2000,
+        lbfgs_epochs:   int = 1000,
         batch_size_int: int = 4000,
-        batch_size_bc: int = 800,
+        batch_size_bc:  int = 800,
+        warmup_epochs:  int = 500,
     ) -> Dict[str, list]:
         """
-        Production-grade two-stage training with comprehensive logging and checkpointing.
-        
-        STAGE 1 - Adam Optimization (1600 epochs):
-            • CosineAnnealingLR scheduler: gradually reduces learning rate from lr to 1e-6
-            • Batch-wise sampling: interior, walls, inlet, outlet
-            • Full loss computation with all regularization terms
-            • Checkpoint every 200 epochs, full save at stage end
-        
-        STAGE 2 - L-BFGS Refinement (1500 max iterations):
-            • Ultra-tight tolerances: change=1e-16, grad=1e-16
-            • Strong Wolfe line search for robust convergence
-            • History size = 50 for memory efficiency
-            • Does NOT terminate early (fixed_iter=True behavior)
-        
+        Uc asamali egitim: Analytical Warm-Up -> Physics Adam -> L-BFGS
+
         Args:
-            adam_epochs: Number of Adam optimization epochs (default 1600)
-            lbfgs_epochs: Max L-BFGS iterations (default 1500)
-            batch_size_int: Interior collocation points per batch (default 4000)
-            batch_size_bc: Boundary collocation points per batch (default 800)
-        
+            adam_epochs:    Toplam Adam epoch sayisi (warm-up dahil)
+            lbfgs_epochs:   L-BFGS maksimum iterasyon sayisi
+            batch_size_int: Ic nokta batch boyutu
+            batch_size_bc:  Sinir nokta batch boyutu
+            warmup_epochs:  Analitik pre-training epoch sayisi (PDE YOK)
+
         Returns:
-            Dictionary with loss history for analysis
+            loss_history sozlugu
         """
         self.model.train()
-        
-        # Setup CosineAnnealingLR scheduler for Adam phase
-        self.scheduler = CosineAnnealingLR(
-            self.adam_optimizer,
-            T_max=adam_epochs,
-            eta_min=1e-6,  # Minimum learning rate
-        )
-        
-        logger.info("=" * 80)
-        logger.info("STAGE 1: Adam Optimization with CosineAnnealingLR Scheduler")
-        logger.info("=" * 80)
-        logger.info(f"Epochs: {adam_epochs} | Batch(Interior): {batch_size_int} | Batch(BC): {batch_size_bc}")
-        logger.info(f"Loss weights: λ_bc={self.lambda_bc:.1e} | PDE=100×(cont+mom) | "
-                    f"λ_radial=20.0 | λ_pos=500.0 | λ_smooth=5.0")
-        
-        stage1_start_time = time.time()
-        
-        # STAGE 1: Adam Optimization
-        for epoch in range(1, adam_epochs + 1):
-            self.adam_optimizer.zero_grad()
-            
-            # Sample collocation points
-            int_pts = self.geometry.sample_interior(batch_size_int, self.device)
-            bc_pts = self.geometry.sample_walls(batch_size_bc, self.device)
-            in_pts = self.geometry.sample_inlet(batch_size_bc, self.device)
-            out_pts = self.geometry.sample_outlet(batch_size_bc, self.device)
-            
-            # ============================================================================
-            # COMPUTE ALL LOSSES
-            # ============================================================================
-            
-            # 1. PDE Loss — her iki terim 100× (momentum ağırlığı spatial aliasing'i yok eder)
-            l_cont, l_mom = self.physics.compute_pde_loss(self.model, int_pts)
-            pde_loss = (100.0 * l_cont) + (100.0 * l_mom)
-            
-            # 2. Interior Point Losses (Radial Guide, Positivity, Smoothness)
-            preds_int = self.model(int_pts)
-            u_pred_int = preds_int[:, 0:1]
-            
-            # Positivity constraint: u_x ≥ 0 everywhere
-            l_pos = torch.mean(torch.relu(-u_pred_int))
-            
-            # Radial guide: enforce parabolic profile
-            l_radial = self._compute_radial_guide_loss(preds_int, int_pts)
-            
-            # Axial smoothness: suppress d²u/dx² (kills vertical aliasing)
-            l_smooth = self._compute_axial_smoothness_loss(int_pts)
-            
-            # 3. Boundary Condition Losses
-            # Wall: no-slip BC (u=v=w=0 at r=R)
-            l_wall = torch.mean(self.model(bc_pts)[:, 0:3] ** 2)
-            
-            # Inlet: parabolic profile
-            l_in = self._compute_inlet_loss(self.model(in_pts), in_pts)
-            
-            # Outlet: open BC (∂p/∂x = 0, approximated by suppressing pressure gradient)
-            l_out = torch.mean(self.model(out_pts)[:, 3:4] ** 2)
-            
-            # ============================================================================
-            # COMBINE LOSSES — Altın Oran Kalibrasyonu
-            # ============================================================================
-            l_bc_total = self.lambda_bc * (l_wall + l_in + l_out)
+        physics_epochs = max(0, adam_epochs - warmup_epochs)
 
-            total_loss = (
-                pde_loss
-                + (20.0  * l_radial)
-                + (500.0 * l_pos)
-                + (5.0   * l_smooth)
-                + l_bc_total
-            )
-            
-            # Backward pass
-            total_loss.backward()
+        p_coeff = 8.0 * self.physics.nu / (self.geometry.radius ** 2)
+        logger.info("=" * 70)
+        logger.info("ANALYTICAL PRESSURE COUPLING PIPELINE STARTED")
+        logger.info(
+            f"Warm-Up: {warmup_epochs} epochs | "
+            f"Physics Adam: {physics_epochs} epochs | "
+            f"L-BFGS: {lbfgs_epochs} iters"
+        )
+        logger.info(
+            f"Re={1.0/self.physics.nu:.0f} | "
+            f"p_coeff={p_coeff:.4f} (p_exact=p_coeff*(L-x)) | "
+            f"lambda_bc={self.lambda_bc:.1f} | PDE=10x"
+        )
+        logger.info("=" * 70)
+
+        # =====================================================================
+        # STAGE 0: WARM-UP — analitik u+p kilidi, PDE yok
+        # =====================================================================
+        logger.info("--- STAGE 0: Analytical Warm-Up (u_exact + p_exact coupling) ---")
+
+        warmup_scheduler = CosineAnnealingLR(
+            self.adam_optimizer, T_max=max(warmup_epochs, 1), eta_min=1e-5
+        )
+        t0 = time.time()
+
+        for epoch in range(1, warmup_epochs + 1):
+            self.adam_optimizer.zero_grad()
+
+            int_pts = self.geometry.sample_interior(batch_size_int, self.device)
+
+            preds  = self.model(int_pts)
+            u_pred = preds[:, 0:1]
+            p_pred = preds[:, 3:4]
+
+            u_exact = self._compute_exact_velocity(int_pts)
+            p_exact = self._compute_exact_pressure(int_pts)
+
+            # Analytical Pressure Coupling: tam olarak loss_u + loss_p
+            loss_u      = torch.mean((u_pred - u_exact) ** 2)
+            loss_p      = torch.mean((p_pred - p_exact) ** 2)
+            warmup_loss = loss_u + loss_p
+
+            warmup_loss.backward()
             self.adam_optimizer.step()
-            self.scheduler.step()
-            
-            # Store history
-            self.loss_history['total'].append(total_loss.item())
-            self.loss_history['pde'].append(pde_loss.item())
-            self.loss_history['radial'].append(l_radial.item())
-            self.loss_history['positivity'].append(l_pos.item())
-            self.loss_history['smoothness'].append(l_smooth.item())
-            self.loss_history['boundary'].append(l_bc_total.item())
-            self.loss_history['continuity'].append(l_cont.item())
-            self.loss_history['momentum'].append(l_mom.item())
-            
-            # Logging
+            warmup_scheduler.step()
+
+            self.loss_history['warmup'].append(warmup_loss.item())
+
             if epoch % 50 == 0 or epoch == 1:
-                elapsed = time.time() - stage1_start_time
+                with torch.no_grad():
+                    u_mae = torch.mean(torch.abs(u_pred - u_exact)).item()
+                    p_mae = torch.mean(torch.abs(p_pred - p_exact)).item()
+                elapsed = time.time() - t0
                 logger.info(
-                    f"Epoch {epoch:5d}/{adam_epochs} | Tot: {total_loss.item():.2e} | "
-                    f"PDE: {pde_loss.item():.2e} | Radial: {l_radial.item():.2e} | "
-                    f"Smooth: {l_smooth.item():.2e} | LR: {self.scheduler.get_last_lr()[0]:.2e} | "
+                    f"[Warm-Up] Epoch {epoch:4d}/{warmup_epochs} | "
+                    f"Loss: {warmup_loss.item():.3e} | "
+                    f"u_MAE={u_mae:.4f}  p_MAE={p_mae:.4f} | "
+                    f"LR: {warmup_scheduler.get_last_lr()[0]:.2e} | "
                     f"Time: {elapsed:.1f}s"
                 )
-            
-            # Checkpoint every 200 epochs
-            if epoch % 200 == 0:
-                os.makedirs("checkpoints", exist_ok=True)
-                ckpt_path = f"checkpoints/auto_ckpt_adam_{epoch}.pth"
-                torch.save(self.model.state_dict(), ckpt_path)
-                logger.info(f"  → Checkpoint saved: {ckpt_path}")
-        
-        stage1_duration = time.time() - stage1_start_time
-        logger.info(f"STAGE 1 COMPLETE in {stage1_duration:.1f}s | Final Loss: {total_loss.item():.2e}\n")
-        
-        # ============================================================================
-        # STAGE 2: L-BFGS OPTIMIZATION (Perseverant, never gives up)
-        # ============================================================================
-        logger.info("=" * 80)
-        logger.info("STAGE 2: L-BFGS Optimization (Perseverance Mode)")
-        logger.info("=" * 80)
-        logger.info(f"Max Iterations: {lbfgs_epochs} | Tolerance Change: 1e-16 | Tolerance Grad: 1e-16")
-        logger.info(f"Line Search: strong_wolfe | History Size: 50")
-        
-        lbfgs_optimizer = optim.LBFGS(
+
+        warmup_dur = time.time() - t0
+
+        # Warm-up sonu dogrulama (u ve p)
+        with torch.no_grad():
+            val_pts    = self.geometry.sample_interior(2000, self.device)
+            val_preds  = self.model(val_pts)
+            val_u_mae  = torch.mean(torch.abs(
+                val_preds[:, 0:1] - self._compute_exact_velocity(val_pts)
+            )).item()
+            val_p_mae  = torch.mean(torch.abs(
+                val_preds[:, 3:4] - self._compute_exact_pressure(val_pts)
+            )).item()
+
+        logger.info(
+            f"WARM-UP COMPLETE in {warmup_dur:.1f}s | "
+            f"Validation u_MAE={val_u_mae:.5f}  p_MAE={val_p_mae:.5f}"
+        )
+        os.makedirs("checkpoints", exist_ok=True)
+        wu_ckpt = "checkpoints/warmup_pretrained.pth"
+        torch.save(self.model.state_dict(), wu_ckpt)
+        logger.info(f"Warm-up checkpoint saved: {wu_ckpt}")
+
+        # =====================================================================
+        # STAGE 1: PHYSICS ADAM — N-S + BC, PDE=10x, BC grad-norm dinamik
+        # =====================================================================
+        phys_dur   = 0.0
+        total_loss = torch.tensor(0.0, device=self.device)
+
+        if physics_epochs > 0:
+            logger.info("")
+            logger.info(
+                "--- STAGE 1: Physics Training "
+                "(N-S PDE=10x + BC lambda_bc=5000 + Grad-Norm) ---"
+            )
+
+            for pg in self.adam_optimizer.param_groups:
+                pg['lr'] = self._init_lr
+            physics_scheduler = CosineAnnealingLR(
+                self.adam_optimizer, T_max=physics_epochs, eta_min=1e-6
+            )
+            self.scheduler = physics_scheduler
+
+            t1 = time.time()
+
+            for epoch in range(1, physics_epochs + 1):
+                self.adam_optimizer.zero_grad()
+
+                int_pts = self.geometry.sample_interior(batch_size_int, self.device)
+                bc_pts  = self.geometry.sample_walls(batch_size_bc, self.device)
+                in_pts  = self.geometry.sample_inlet(batch_size_bc, self.device)
+                out_pts = self.geometry.sample_outlet(batch_size_bc, self.device)
+
+                losses = self._physics_loss(int_pts, bc_pts, in_pts, out_pts)
+
+                # Grad-norm ile BC agirligini guncelle (her 20 epochta)
+                if epoch % 20 == 0 or epoch == 1:
+                    self._update_grad_norms(losses['pde'], losses['bc_raw'])
+
+                total_loss = self._assemble_total(losses, self._dyn_w_bc)
+
+                total_loss.backward()
+                self.adam_optimizer.step()
+                physics_scheduler.step()
+
+                for key in ('pde', 'radial', 'positivity', 'smoothness',
+                            'boundary', 'continuity', 'momentum'):
+                    self.loss_history[key].append(losses[key].item())
+                self.loss_history['total'].append(total_loss.item())
+
+                if epoch % 50 == 0 or epoch == 1:
+                    elapsed = time.time() - t1
+                    logger.info(
+                        f"[Physics] Epoch {epoch:4d}/{physics_epochs} | "
+                        f"Tot: {total_loss.item():.2e} | "
+                        f"PDE: {losses['pde'].item():.2e} | "
+                        f"BC: {losses['boundary'].item():.2e} | "
+                        f"w_bc={self._dyn_w_bc:.2f} | "
+                        f"LR: {physics_scheduler.get_last_lr()[0]:.2e} | "
+                        f"Time: {elapsed:.1f}s"
+                    )
+
+                if epoch % 200 == 0:
+                    ckpt = f"checkpoints/physics_adam_{epoch}.pth"
+                    torch.save(self.model.state_dict(), ckpt)
+                    logger.info(f"  Checkpoint: {ckpt}")
+
+            phys_dur = time.time() - t1
+            logger.info(
+                f"STAGE 1 COMPLETE in {phys_dur:.1f}s | "
+                f"Final Loss: {total_loss.item():.2e} | "
+                f"Final w_bc={self._dyn_w_bc:.3f}"
+            )
+
+        # =====================================================================
+        # STAGE 2: L-BFGS — Stage 1 dinamik agirliklarini kullanir
+        # =====================================================================
+        logger.info("")
+        logger.info("--- STAGE 2: L-BFGS Fine-Tuning ---")
+        logger.info(
+            f"Max iters: {lbfgs_epochs} | tol=1e-16 | strong_wolfe | "
+            f"w_bc={self._dyn_w_bc:.3f}"
+        )
+
+        lbfgs_opt = optim.LBFGS(
             self.model.parameters(),
             max_iter=lbfgs_epochs,
             history_size=50,
-            tolerance_change=1e-16,      # ULTRA-TIGHT: never stop due to loss change
-            tolerance_grad=1e-16,        # ULTRA-TIGHT: never stop due to gradient size
-            line_search_fn='strong_wolfe',  # Robust line search
+            tolerance_change=1e-16,
+            tolerance_grad=1e-16,
+            line_search_fn='strong_wolfe',
         )
-        
-        # Sample points once (fixed batch for full L-BFGS phase)
-        int_pts_b = self.geometry.sample_interior(batch_size_int, self.device)
-        bc_pts_b = self.geometry.sample_walls(batch_size_bc, self.device)
-        in_pts_b = self.geometry.sample_inlet(batch_size_bc, self.device)
-        out_pts_b = self.geometry.sample_outlet(batch_size_bc, self.device)
-        
-        stage2_start_time = time.time()
-        iteration_count = [0]  # Track iterations for logging
-        
-        def closure():
-            """Closure function for L-BFGS step computation."""
-            iteration_count[0] += 1
-            
-            lbfgs_optimizer.zero_grad()
-            
-            # Compute all losses
-            l_cont, l_mom = self.physics.compute_pde_loss(self.model, int_pts_b)
-            pde_loss = (100.0 * l_cont) + (100.0 * l_mom)
 
-            preds_int = self.model(int_pts_b)
-            u_pred_int = preds_int[:, 0:1]
+        int_pts_b  = self.geometry.sample_interior(batch_size_int, self.device)
+        bc_pts_b   = self.geometry.sample_walls(batch_size_bc, self.device)
+        in_pts_b   = self.geometry.sample_inlet(batch_size_bc, self.device)
+        out_pts_b  = self.geometry.sample_outlet(batch_size_bc, self.device)
 
-            l_pos = torch.mean(torch.relu(-u_pred_int))
-            l_radial = self._compute_radial_guide_loss(preds_int, int_pts_b)
-            l_smooth = self._compute_axial_smoothness_loss(int_pts_b)
+        t2          = time.time()
+        iters       = [0]
+        final_w_bc  = self._dyn_w_bc  # Stage 1 sonu degerini kilitle
 
-            l_wall = torch.mean(self.model(bc_pts_b)[:, 0:3] ** 2)
-            l_in = self._compute_inlet_loss(self.model(in_pts_b), in_pts_b)
-            l_out = torch.mean(self.model(out_pts_b)[:, 3:4] ** 2)
-
-            l_bc_total = self.lambda_bc * (l_wall + l_in + l_out)
-
-            total_loss = (
-                pde_loss
-                + (20.0  * l_radial)
-                + (500.0 * l_pos)
-                + (5.0   * l_smooth)
-                + l_bc_total
-            )
-            
-            # Backward pass
-            total_loss.backward()
-            
-            # Log every 50 iterations
-            if iteration_count[0] % 50 == 0 or iteration_count[0] == 1:
-                elapsed = time.time() - stage2_start_time
+        def closure() -> torch.Tensor:
+            iters[0] += 1
+            lbfgs_opt.zero_grad()
+            losses = self._physics_loss(int_pts_b, bc_pts_b, in_pts_b, out_pts_b)
+            loss   = self._assemble_total(losses, final_w_bc)
+            loss.backward()
+            if iters[0] % 50 == 0 or iters[0] == 1:
+                elapsed = time.time() - t2
                 logger.info(
-                    f"L-BFGS Iter {iteration_count[0]:5d} | Tot: {total_loss.item():.2e} | "
-                    f"PDE: {pde_loss.item():.2e} | Radial: {l_radial.item():.2e} | "
-                    f"Smooth: {l_smooth.item():.2e} | Time: {elapsed:.1f}s"
+                    f"[L-BFGS] Iter {iters[0]:4d} | "
+                    f"Tot: {loss.item():.2e} | "
+                    f"PDE: {losses['pde'].item():.2e} | "
+                    f"BC: {losses['boundary'].item():.2e} | "
+                    f"Time: {elapsed:.1f}s"
                 )
-            
-            return total_loss
-        
-        # Execute L-BFGS (will run up to max_iter or until convergence)
-        lbfgs_optimizer.step(closure)
-        
-        stage2_duration = time.time() - stage2_start_time
-        logger.info(f"STAGE 2 COMPLETE in {stage2_duration:.1f}s | Total iterations: {iteration_count[0]}\n")
-        
-        # Save final model
+            return loss
+
+        lbfgs_opt.step(closure)
+        lbfgs_dur = time.time() - t2
+        logger.info(f"STAGE 2 COMPLETE in {lbfgs_dur:.1f}s | Total iters: {iters[0]}")
+
         os.makedirs("checkpoints", exist_ok=True)
         final_path = "checkpoints/pipe_flow_final.pth"
         torch.save(self.model.state_dict(), final_path)
-        logger.info(f"✓ Final model saved to {final_path}")
-        
-        total_duration = stage1_duration + stage2_duration
-        logger.info(f"✓ Total training duration: {total_duration:.1f}s ({total_duration/60:.1f}m)")
-        logger.info("=" * 80)
-        
+        logger.info(f"Final model saved: {final_path}")
+
+        total_dur = warmup_dur + phys_dur + lbfgs_dur
+        logger.info(f"Total training time: {total_dur:.1f}s ({total_dur / 60:.1f}min)")
+        logger.info("=" * 70)
+
         return self.loss_history

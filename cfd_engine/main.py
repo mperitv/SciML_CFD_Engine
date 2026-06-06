@@ -20,11 +20,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("SciML_CFD_Engine")
 
-from cfd_engine.src.models.networks import PINN3DEngine
-from cfd_engine.src.physics.navier_stokes import NavierStokes3DPhysics
-from cfd_engine.src.geometry.sdf_sampler import PipeGeometrySampler
-from cfd_engine.src.post_processing.visualizer import CFDVisualizer
-from cfd_engine.src.training.trainer import PINNTrainer
+from src.models.networks import PINN3DEngine
+from src.physics.navier_stokes import NavierStokes3DPhysics
+from src.geometry.sdf_sampler import PipeGeometrySampler
+from src.post_processing.visualizer import CFDVisualizer
+from src.training.trainer import PINNTrainer
 
 
 # ============================================================================
@@ -69,11 +69,20 @@ def build_simulation_components(
     # ========================================================================
     # PHYSICS ENGINE
     # ========================================================================
-    spatial_weight_start = float(os.environ.get('SPATIAL_WEIGHT_START', '1.0'))
-    spatial_weight_slope = float(os.environ.get('SPATIAL_WEIGHT_SLOPE', '1.0'))
+    spatial_weight_start    = float(os.environ.get('SPATIAL_WEIGHT_START',    '1.0'))
+    spatial_weight_slope    = float(os.environ.get('SPATIAL_WEIGHT_SLOPE',    '1.0'))
     outlet_suction_strength = float(os.environ.get('OUTLET_SUCTION_STRENGTH', '5.0'))
-    outlet_suction_width = float(os.environ.get('OUTLET_SUCTION_WIDTH', '0.05'))
-    
+    outlet_suction_width    = float(os.environ.get('OUTLET_SUCTION_WIDTH',    '0.05'))
+
+    # Hagen-Poiseuille analitik itme kuvveti: f = 8*nu/R^2
+    # Re=100, R=0.5 → f = 8/(100*0.25) = 0.32  |  Re=50, R=0.5 → f = 0.64
+    # Bu deger warm-up'ta ogretilen p_exact = f*(L-x) ile tutarlidir.
+    nu_val        = 1.0 / float(reynolds_number)
+    driving_force = float(os.environ.get(
+        'DRIVING_FORCE',
+        str(8.0 * nu_val / (float(radius) ** 2))
+    ))
+
     physics = NavierStokes3DPhysics(
         Re=float(reynolds_number),
         spatial_weight_start=spatial_weight_start,
@@ -81,8 +90,12 @@ def build_simulation_components(
         pipe_length=float(length),
         outlet_suction_strength=outlet_suction_strength,
         outlet_suction_width=outlet_suction_width,
+        driving_force=driving_force,
     )
-    logger.info(f"Physics: Re={reynolds_number}, spatial_weight_start={spatial_weight_start}")
+    logger.info(
+        f"Physics: Re={reynolds_number}, nu={nu_val:.4f}, "
+        f"driving_force={driving_force:.4f} | spatial_weight_start={spatial_weight_start}"
+    )
     
     # ========================================================================
     # NEURAL NETWORK MODEL
@@ -103,8 +116,8 @@ def build_simulation_components(
     # ========================================================================
     # TRAINER WITH PRODUCTION WEIGHTS (Golden Ratio Tuning for Poiseuille)
     # ========================================================================
-    lr = float(os.environ.get('LR', '1e-3'))
-    lambda_bc = float(os.environ.get('LAMBDA_BC', '15000.0'))  # Strict wall BC (no slip)
+    lr        = float(os.environ.get('LR', '1e-3'))
+    lambda_bc = float(os.environ.get('LAMBDA_BC', '100.0'))  # Pre-training sonrası sakin BC
 
     trainer = PINNTrainer(
         model=model,
@@ -114,8 +127,10 @@ def build_simulation_components(
         lr=lr,
         lambda_bc=lambda_bc,
     )
-    logger.info(f"Trainer initialized: lr={lr:.2e}, λ_bc={lambda_bc:.1e} | "
-                f"Hardcoded: λ_radial=20.0, λ_pos=500.0, λ_smooth=5.0 | PDE=100×(cont+mom)")
+    logger.info(
+        f"Trainer initialized: lr={lr:.2e}, lambda_bc={lambda_bc:.1f} | "
+        f"Physics weights: PDE=1x, radial=1x, pos=10x, smooth=1x"
+    )
     
     # ========================================================================
     # VISUALIZER
@@ -145,27 +160,30 @@ def run_simulation(
     lbfgs_epochs: int = 1000,
     batch_size_int: int = 4000,
     batch_size_bc: int = 800,
+    warmup_epochs: int = 500,
     output_dir: str = "output",
     run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Execute complete 3D pipe flow PINN simulation (API interface).
-    
-    Two-stage training:
-    1. Adam: 2000 epochs with CosineAnnealingLR
-    2. L-BFGS: 1000 iterations with 1e-16 tolerances
-    
+
+    Three-stage training:
+    1. Warm-Up: 500 epochs — analitik Poiseuille fit (PDE yok)
+    2. Physics Adam: 1500 epochs — N-S + BC, sakin katsayılar
+    3. L-BFGS: 1000 iterations — 1e-16 toleranslı ince ayar
+
     Args:
         reynolds_number: Flow Reynolds number
         radius: Pipe radius
         length: Pipe length
-        adam_epochs: First stage epochs (default 2000)
-        lbfgs_epochs: Second stage max iterations (default 1000)
+        adam_epochs: Toplam Adam epoch sayısı (warm-up dahil, default 2000)
+        lbfgs_epochs: L-BFGS max iterasyon sayısı (default 1000)
         batch_size_int: Interior batch size (default 4000)
         batch_size_bc: Boundary batch size (default 800)
+        warmup_epochs: Analytical pre-training epochs (default 500)
         output_dir: Directory for results
         run_id: Optional run identifier
-    
+
     Returns:
         Dictionary with image_path, history, model_state_path
     """
@@ -191,8 +209,9 @@ def run_simulation(
         lbfgs_epochs=lbfgs_epochs,
         batch_size_int=batch_size_int,
         batch_size_bc=batch_size_bc,
+        warmup_epochs=warmup_epochs,
     )
-    
+
     # Save outputs
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -233,7 +252,7 @@ def main():
     All parameters configurable via environment variables:
     
     GEOMETRY:
-        RE=50.0               Reynolds number (laminar Poiseuille)
+        RE=100.0              Reynolds number (laminar Poiseuille, p_coeff=0.32)
         RADIUS=0.5            Pipe radius
         LENGTH=3.0            Pipe length
     
@@ -248,12 +267,15 @@ def main():
         BATCH_INTERIOR=4000   Interior collocation points/batch
         BATCH_BOUNDARY=800    Boundary collocation points/batch
     
-    LOSS WEIGHTS (Hardcoded — Altın Oran Kalibrasyonu):
-        PDE = 100×cont + 100×mom  (momentum 100× → dikey çizgileri bastırır)
-        λ_radial=20.0             Parabolün doğal oluşması (gevşetildi)
-        λ_pos=500.0               Positivity penalty (u_x >= 0)
-        λ_smooth=5.0              du/dx L2 normu (Poiseuille kısıtı)
-        LAMBDA_BC=15000.0         Strict wall BC enforcement (u=0 at r=R)
+    TRAINING:
+        WARMUP_EPOCHS=500     Analytical pre-training (no PDE)
+        ADAM_EPOCHS=2000      Total Adam epochs (warmup + physics)
+        LBFGS_EPOCHS=1000     L-BFGS max iterations
+
+    LOSS WEIGHTS (Hardcoded — Pre-training sonrasi sakin degerler):
+        PDE = l_cont + l_mom  (1x — warm-up sayesinde yeterli)
+        radial=1.0  pos=10.0  smooth=1.0
+        LAMBDA_BC=100.0       Wall BC (pre-training ile zaten ogrenildi)
     
     PHYSICS:
         SPATIAL_WEIGHT_START=1.0      Initial spatial weighting
@@ -282,22 +304,30 @@ def main():
     # ========================================================================
     
     # Geometry
-    reynolds_number = float(os.environ.get('RE', '50.0'))
+    reynolds_number = float(os.environ.get('RE', '100.0'))
     radius = float(os.environ.get('RADIUS', '0.5'))
     length = float(os.environ.get('LENGTH', '3.0'))
 
-    # Training - Adam stage
-    adam_epochs = int(os.environ.get('ADAM_EPOCHS', '2000'))
-    lbfgs_epochs = int(os.environ.get('LBFGS_EPOCHS', '1000'))
-    
+    # Training schedule
+    adam_epochs   = int(os.environ.get('ADAM_EPOCHS',   '2000'))
+    lbfgs_epochs  = int(os.environ.get('LBFGS_EPOCHS',  '1000'))
+    warmup_epochs = int(os.environ.get('WARMUP_EPOCHS', '500'))
+
     # Batching
     batch_size_int = int(os.environ.get('BATCH_INTERIOR', '4000'))
-    batch_size_bc = int(os.environ.get('BATCH_BOUNDARY', '800'))
-    
+    batch_size_bc  = int(os.environ.get('BATCH_BOUNDARY', '800'))
+
     logger.info(f"Geometry: Re={reynolds_number}, R={radius}, L={length}")
-    logger.info(f"Training: Adam={adam_epochs}e, L-BFGS={lbfgs_epochs}i")
+    logger.info(
+        f"Training: Warm-Up={warmup_epochs}e | "
+        f"Physics Adam={adam_epochs - warmup_epochs}e | "
+        f"L-BFGS={lbfgs_epochs}i"
+    )
     logger.info(f"Batching: Interior={batch_size_int}, BC={batch_size_bc}")
-    logger.info(f"Loss Weights (Golden Ratio): λ_bc=15000.0 | PDE=100×(cont+mom) | λ_radial=20.0 | λ_smooth=5.0 | λ_pos=500.0")
+    logger.info(
+        f"Loss weights: lambda_bc=100.0 | PDE=1x(cont+mom) | "
+        f"radial=1x | pos=10x | smooth=1x"
+    )
     
     # ========================================================================
     # BUILD COMPONENTS
@@ -322,8 +352,9 @@ def main():
         lbfgs_epochs=lbfgs_epochs,
         batch_size_int=batch_size_int,
         batch_size_bc=batch_size_bc,
+        warmup_epochs=warmup_epochs,
     )
-    
+
     # ========================================================================
     # SAVE AND VISUALIZE RESULTS
     # ========================================================================

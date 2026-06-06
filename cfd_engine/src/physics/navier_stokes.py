@@ -30,6 +30,7 @@ class NavierStokes3DPhysics:
         outlet_suction_strength: float = 5.0,
         outlet_suction_width: float = 0.05,
         artificial_pressure_gradient: float = 0.0,
+        driving_force: float = 0.64,
     ):
         self.Re = Re
         self.nu = 1.0 / Re
@@ -38,14 +39,17 @@ class NavierStokes3DPhysics:
                 "Steady-State solver is not physically valid for turbulent flows (Re > 2000). "
                 "Expect non-convergence or add time (t) dependency."
             )
-        # Spatial weighting for curriculum learning (weights applied to PDE residuals)
         self.spatial_weight_start = spatial_weight_start
         self.spatial_weight_slope = spatial_weight_slope
         self.pipe_length = float(pipe_length)
         self.outlet_suction_strength = outlet_suction_strength
         self.outlet_suction_width = float(outlet_suction_width)
-        # Small artificial pressure gradient (dP/dx) to bias flow towards +x during curriculum
         self.artificial_pressure_gradient = artificial_pressure_gradient
+        # Hagen-Poiseuille analitik basınç eğimi itme kuvveti.
+        # Formül: f = 8 * nu / R²  →  Re=50, R=0.5 için = 8/(50*0.25) = 0.64
+        # Bu sabit, ağın bağımsız p_x öğrenmesine gerek kalmadan akışı
+        # soldan sağa fiziksel olarak iter (sönümlenme engelleyici).
+        self.driving_force = float(driving_force)
 
     def _ensure_differentiable_coords(self, coords: torch.Tensor) -> torch.Tensor:
         if not coords.requires_grad:
@@ -106,7 +110,9 @@ class NavierStokes3DPhysics:
         # Strong artificial pressure gradient used as a downstream biasing force.
         # Multiplying the pressure gradient by a factor helps force the solution
         # to propagate flow all the way to the pipe exit.
-        momentum_x = (u * u_x + v * u_y + w * u_z) + p_x - self.nu * laplacian_u - 5.0 * self.artificial_pressure_gradient
+        # driving_force = 0.64 (Re=50, R=0.5): akışı soldan sağa fiziksel olarak iter.
+        # Tam çözümde: p_x = -0.64, nu*lap_u = -0.64 → residual = 0 ✓
+        momentum_x = (u * u_x + v * u_y + w * u_z) + p_x - self.nu * laplacian_u - self.driving_force
         momentum_y = (u * v_x + v * v_y + w * v_z) + p_y - self.nu * laplacian_v
         momentum_z = (u * w_x + v * w_y + w * w_z) + p_z - self.nu * laplacian_w
 
