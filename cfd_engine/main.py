@@ -101,12 +101,12 @@ def build_simulation_components(
     logger.info(f"Model: PINN3DEngine with {hidden_dim}D embeddings, {num_layers} layers, {param_count:,} parameters")
     
     # ========================================================================
-    # TRAINER WITH PRODUCTION WEIGHTS (Tuned for Poiseuille Flow)
+    # TRAINER WITH PRODUCTION WEIGHTS (Golden Ratio Tuning for Poiseuille)
     # ========================================================================
     lr = float(os.environ.get('LR', '1e-3'))
-    lambda_bc = float(os.environ.get('LAMBDA_BC', '15000.0'))       # Strict wall BC
-    lambda_smooth = float(os.environ.get('LAMBDA_SMOOTH', '10.0'))  # Light smoothing
-    lambda_radial = float(os.environ.get('LAMBDA_RADIAL', '50.0'))  # Relaxed radial guide
+    lambda_bc = float(os.environ.get('LAMBDA_BC', '15000.0'))       # Strict wall BC (no slip)
+    lambda_smooth = float(os.environ.get('LAMBDA_SMOOTH', '40.0'))  # Optimal smoothing
+    lambda_radial = float(os.environ.get('LAMBDA_RADIAL', '250.0')) # Sweet spot radial guide
     lambda_pos = float(os.environ.get('LAMBDA_POS', '500.0'))
     
     trainer = PINNTrainer(
@@ -253,10 +253,10 @@ def main():
         BATCH_INTERIOR=4000   Interior collocation points/batch
         BATCH_BOUNDARY=800    Boundary collocation points/batch
     
-    LOSS WEIGHTS (Tuned for Poiseuille flow):
-        LAMBDA_RADIAL=50.0        Relaxed radial guide (allows natural profile)
+    LOSS WEIGHTS (Golden Ratio Tuning for Poiseuille):
+        LAMBDA_RADIAL=250.0       Sweet spot radial guide (balanced)
         LAMBDA_POS=500.0          Positivity penalty (u_x >= 0)
-        LAMBDA_SMOOTH=10.0        Light axial smoothness (permits radial curvature)
+        LAMBDA_SMOOTH=40.0        Optimal axial smoothness (anti-aliasing)
         LAMBDA_BC=15000.0         Strict wall BC enforcement (u=0 at r=R)
     
     PHYSICS:
@@ -301,7 +301,7 @@ def main():
     logger.info(f"Geometry: Re={reynolds_number}, R={radius}, L={length}")
     logger.info(f"Training: Adam={adam_epochs}e, L-BFGS={lbfgs_epochs}i")
     logger.info(f"Batching: Interior={batch_size_int}, BC={batch_size_bc}")
-    logger.info(f"Loss Weights (Tuned for Poiseuille): λ_bc=15000.0, λ_radial=50.0, λ_smooth=10.0, λ_pos=500.0")
+    logger.info(f"Loss Weights (Golden Ratio): λ_bc=15000.0, λ_radial=250.0, λ_smooth=40.0, λ_pos=500.0")
     
     # ========================================================================
     # BUILD COMPONENTS

@@ -17,17 +17,17 @@ class PINNTrainer:
     1. Adam (1600 epochs) with CosineAnnealingLR scheduler for coarse fit
     2. L-BFGS (1500 max iterations) with ultra-tight tolerances for fine refinement
     
-    Loss architecture (Tuned for Poiseuille flow with natural parabolic profile):
+    Loss architecture (Golden Ratio Tuning - Balanced Poiseuille Flow):
     - PDE (Continuity × 100 + Momentum)
-    - Radial Guide (× 50): guides toward parabolic profile WITHOUT over-constraining
+    - Radial Guide (× 250): balanced guide toward parabolic profile
     - Positivity (× 500): ensures u_x ≥ 0 everywhere
-    - Axial Smoothness (× 10): light regularization for smooth gradients
+    - Axial Smoothness (× 40): optimal regularization for smooth gradients
     - Boundary Conditions (× λ_bc=15000): strict wall no-slip enforcement
     
     Physics basis:
-    - Radial guide relaxed from 1000× to 50× allows Navier-Stokes natural physics to emerge
-    - Wall BC strengthened to 15000× ensures u=0 at r=R (no wall slip)
-    - Smoothness relaxed to 10× permits radial curvature flexibility
+    - Radial guide 250× (sweet spot): not too harsh to stifle physics, not too weak to lose profile
+    - Wall BC 15000× ensures u=0 at r=R (no wall slip) - maintains blue dissipation at walls
+    - Smoothness 40× (optimal): prevents aliasing without over-constraining radial curvature
     """
     
     def __init__(
@@ -38,8 +38,8 @@ class PINNTrainer:
         device: torch.device,
         lr: float = 1e-3,
         lambda_bc: float = 15000.0,
-        lambda_smooth: float = 10.0,
-        lambda_radial: float = 50.0,
+        lambda_smooth: float = 40.0,
+        lambda_radial: float = 250.0,
         lambda_pos: float = 500.0,
     ):
         self.model = model
