@@ -47,8 +47,17 @@ def main():
     model = PINN3DEngine(hidden_dim=256, num_layers=6, length=length, radius=radius).to(device)
     spatial_weight_start = float(os.environ.get('SPATIAL_WEIGHT_START', '1.0'))
     spatial_weight_slope = float(os.environ.get('SPATIAL_WEIGHT_SLOPE', '1.0'))
-    physics = NavierStokes3DPhysics(Re=REYNOLDS_NUMBER, spatial_weight_start=spatial_weight_start, spatial_weight_slope=spatial_weight_slope)
+    outlet_suction_strength = float(os.environ.get('OUTLET_SUCTION_STRENGTH', '5.0'))
+    outlet_suction_width = float(os.environ.get('OUTLET_SUCTION_WIDTH', '0.05'))
     geometry = PipeGeometrySampler(radius=radius, length=length)
+    physics = NavierStokes3DPhysics(
+        Re=REYNOLDS_NUMBER,
+        spatial_weight_start=spatial_weight_start,
+        spatial_weight_slope=spatial_weight_slope,
+        pipe_length=length,
+        outlet_suction_strength=outlet_suction_strength,
+        outlet_suction_width=outlet_suction_width,
+    )
 
     # 3. Setup Trainer
     log_dir = os.environ.get("LOGDIR", "logs")

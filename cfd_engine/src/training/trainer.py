@@ -201,9 +201,9 @@ class PINNTrainer:
         
         lbfgs_optimizer = torch.optim.LBFGS(
             self.model.parameters(), 
-            max_iter=lbfgs_epochs, 
-            tolerance_grad=1e-5, 
-            tolerance_change=1e-9, 
+            max_iter=2000, 
+            tolerance_grad=1e-6, 
+            tolerance_change=1e-12, 
             history_size=50
         )
 

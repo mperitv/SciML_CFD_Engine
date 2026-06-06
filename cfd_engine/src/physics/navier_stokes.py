@@ -18,12 +18,24 @@ class NavierStokes3DPhysics:
     kavramlardır, ancak eğitim sırasında loss → ∇_θ R_θ zinciri kopmamalıdır.
     """
 
-    def __init__(self, Re: float, spatial_weight_start: float = 1.0, spatial_weight_slope: float = 1.0, artificial_pressure_gradient: float = 0.0):
+    def __init__(
+        self,
+        Re: float,
+        spatial_weight_start: float = 1.0,
+        spatial_weight_slope: float = 1.0,
+        pipe_length: float = 3.0,
+        outlet_suction_strength: float = 5.0,
+        outlet_suction_width: float = 0.05,
+        artificial_pressure_gradient: float = 0.0,
+    ):
         self.Re = Re
         self.nu = 1.0 / Re
         # Spatial weighting for curriculum learning (weights applied to PDE residuals)
         self.spatial_weight_start = spatial_weight_start
         self.spatial_weight_slope = spatial_weight_slope
+        self.pipe_length = float(pipe_length)
+        self.outlet_suction_strength = outlet_suction_strength
+        self.outlet_suction_width = float(outlet_suction_width)
         # Small artificial pressure gradient (dP/dx) to bias flow towards +x during curriculum
         self.artificial_pressure_gradient = artificial_pressure_gradient
 
@@ -103,10 +115,21 @@ class NavierStokes3DPhysics:
 
         # Spatial weighting based on X coordinate
         x = coords[:, 0:1]
-        # weight = 1 + slope * max(0, x - start)
-        weight = 1.0 + self.spatial_weight_slope * torch.clamp((x - float(self.spatial_weight_start)), min=0.0)
+        # base downstream curriculum weight
+        base_weight = 1.0 + self.spatial_weight_slope * torch.clamp((x - float(self.spatial_weight_start)), min=0.0)
 
-        loss_cont = torch.mean(weight * (continuity ** 2))
+        # enforce PDE more strongly in the front and back pipe segments
+        edge_mask = 1.0 + 4.0 * (
+            torch.sigmoid((1.0 - x) * 20.0) + torch.sigmoid((x - 2.0) * 20.0)
+        )
+        weight = base_weight * edge_mask
+
+        # additional continuity emphasis at the outlet location
+        outlet_bias = 1.0 + self.outlet_suction_strength * torch.sigmoid(
+            (x - (self.pipe_length - self.outlet_suction_width)) * 50.0
+        )
+
+        loss_cont = torch.mean(weight * outlet_bias * (continuity ** 2))
         loss_mom = torch.mean(weight * (momentum_x ** 2 + momentum_y ** 2 + momentum_z ** 2))
         return loss_cont, loss_mom
 
