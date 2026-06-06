@@ -28,6 +28,7 @@ class PINNTrainer:
         ntk_reg_weight: float = 1e-4,
         lambda_pin: float = 1.0,
         lambda_pos: float = 10.0,
+        lambda_target_vel: float = 1000.0,
         pump_force_max: float = 0.1,
         pump_ramp_epochs: int = 200,
         run_id: Optional[str] = None,
@@ -46,9 +47,21 @@ class PINNTrainer:
         self.ntk_reg_weight = ntk_reg_weight
         self.lambda_pin = lambda_pin
         self.lambda_pos = lambda_pos
+        self.lambda_target_vel = lambda_target_vel
         self.pump_force_max = pump_force_max
         self.pump_ramp_epochs = pump_ramp_epochs
         self.run_id = run_id if run_id is not None else ""
+
+    def _compute_centerline_target_loss(self, model: nn.Module, num_points: int) -> torch.Tensor:
+        L = getattr(self.geometry, 'length', 1.0)
+        x_center = torch.rand((num_points, 1), device=self.device) * float(L)
+        y_center = torch.zeros_like(x_center)
+        z_center = torch.zeros_like(x_center)
+        centerline_coords = torch.cat([x_center, y_center, z_center], dim=1)
+        preds_centerline = model(centerline_coords)
+        u_center = preds_centerline[:, 0:1]
+        loss_target = torch.mean(torch.relu(1.0 - u_center) ** 2)
+        return loss_target
 
     def train(self, adam_epochs: int, lbfgs_epochs: int, batch_size_interior: int = 2000, batch_size_boundary: int = 500) -> Dict[str, list]:
         self.model.train()
@@ -94,6 +107,7 @@ class PINNTrainer:
 
             loss_pin = self.physics.compute_pressure_pinning(self.model, outlet_pts, p_ref=0.0)
             loss_pos = self.physics.compute_positivity_loss(self.model, interior_pts)
+            loss_target = self._compute_centerline_target_loss(self.model, batch_size_boundary)
 
             pde_loss = (loss_cont + loss_mom)
             bc_loss = (loss_wall + loss_inlet + self.lambda_pin * loss_pin + self.lambda_pos * loss_pos)
@@ -116,7 +130,12 @@ class PINNTrainer:
             # Be slightly aggressive (exponent) to favor PDE when needed
             weight_pde = weight_pde_val ** 1.5
 
-            total_loss = weight_pde * pde_loss + self.lambda_bc * bc_loss
+            x_mean = torch.mean(interior_pts[:, 0:1])
+            L = getattr(self.geometry, 'length', 1.0)
+            propagation_factor = 1.0 + 3.0 * torch.sigmoid((x_mean / float(L) - 0.5) * 8.0)
+            weight_pde = weight_pde * propagation_factor
+
+            total_loss = weight_pde * pde_loss + self.lambda_bc * bc_loss + self.lambda_target_vel * loss_target
 
             # NTK regularizer occasionally (cheap small sample)
             ntk_reg = 0.0
@@ -222,6 +241,7 @@ class PINNTrainer:
 
                 loss_pin = self.physics.compute_pressure_pinning(self.model, outlet_pts, p_ref=0.0)
                 loss_pos = self.physics.compute_positivity_loss(self.model, curr_interior)
+                loss_target = self._compute_centerline_target_loss(self.model, curr_inlet.shape[0])
 
                 pde_loss = (loss_cont + loss_mom)
                 bc_loss = (loss_wall + loss_inlet + self.lambda_pin * loss_pin + self.lambda_pos * loss_pos)
@@ -240,7 +260,12 @@ class PINNTrainer:
                 weight_pde_val = (norm_bc.detach() / (norm_pde.detach() + eps)).clamp(0.1, 100.0)
                 weight_pde = weight_pde_val ** 1.5
 
-                total_loss = weight_pde * pde_loss + self.lambda_bc * bc_loss
+                x_mean = torch.mean(curr_interior[:, 0:1])
+                L = getattr(self.geometry, 'length', 1.0)
+                propagation_factor = 1.0 + 3.0 * torch.sigmoid((x_mean / float(L) - 0.5) * 8.0)
+                weight_pde = weight_pde * propagation_factor
+
+                total_loss = weight_pde * pde_loss + self.lambda_bc * bc_loss + self.lambda_target_vel * loss_target
 
                 # small NTK regularizer during L-BFGS closure
                 try:

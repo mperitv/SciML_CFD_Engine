@@ -83,7 +83,10 @@ class NavierStokes3DPhysics:
         continuity = u_x + v_y + w_z
         # Apply a small artificial pressure gradient (acts like a body force) to push flow downstream
         # Note: momentum equation includes +p_x term; subtracting artificial_pressure_gradient biases rightward flow
-        momentum_x = (u * u_x + v * u_y + w * u_z) + p_x - self.nu * laplacian_u - self.artificial_pressure_gradient
+        # Strong artificial pressure gradient used as a downstream biasing force.
+        # Multiplying the pressure gradient by a factor helps force the solution
+        # to propagate flow all the way to the pipe exit.
+        momentum_x = (u * u_x + v * u_y + w * u_z) + p_x - self.nu * laplacian_u - 5.0 * self.artificial_pressure_gradient
         momentum_y = (u * v_x + v * v_y + w * v_z) + p_y - self.nu * laplacian_v
         momentum_z = (u * w_x + v * w_y + w * w_z) + p_z - self.nu * laplacian_w
 

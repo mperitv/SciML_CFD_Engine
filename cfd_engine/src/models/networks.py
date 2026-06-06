@@ -8,8 +8,8 @@ class PINN3DEngine(nn.Module):
         super().__init__()
         
         self.embedding = MultiScaleFourierEmbedding(
-            in_features=3, 
-            sigma_list=[1.0, 10.0, 50.0], 
+            in_features=3,
+            sigma_list=[1.0, 5.0, 10.0],
             frequencies_per_scale=64
         )
         
@@ -18,7 +18,7 @@ class PINN3DEngine(nn.Module):
         
         for _ in range(num_layers):
             layers.append(nn.Linear(in_dim, hidden_dim))
-            layers.append(nn.SiLU())
+            layers.append(nn.Tanh())
             in_dim = hidden_dim
             
         layers.append(nn.Linear(hidden_dim, 4)) # Çıkış: u, v, w, p
