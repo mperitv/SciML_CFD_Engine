@@ -47,11 +47,7 @@ class PINNTrainer:
         lbfgs_epochs: int,
         batch_size_int: int = 4000,
         batch_size_bc: int = 800,
-        batch_size_interior: int | None = None,
-        batch_size_boundary: int | None = None,
     ) -> Dict[str, list]:
-        batch_size_int = batch_size_interior if batch_size_interior is not None else batch_size_int
-        batch_size_bc = batch_size_boundary if batch_size_boundary is not None else batch_size_bc
         self.model.train()
         history = {'loss': []}
         

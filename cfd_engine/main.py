@@ -136,8 +136,8 @@ def main():
     REYNOLDS_NUMBER = float(os.environ.get("RE", "100.0"))
     ADAM_EPOCHS = int(os.environ.get("ADAM_EPOCHS", "1600"))
     LBFGS_EPOCHS = int(os.environ.get("LBFGS_EPOCHS", "100"))
-    BATCH_INTERIOR = int(os.environ.get("BATCH_INTERIOR", "1000"))
-    BATCH_BOUNDARY = int(os.environ.get("BATCH_BOUNDARY", "200"))
+    BATCH_SIZE_INT = int(os.environ.get("BATCH_INTERIOR", "1000"))
+    BATCH_SIZE_BC = int(os.environ.get("BATCH_BOUNDARY", "200"))
     NTK_REG_WEIGHT = float(os.environ.get("NTK_REG_WEIGHT", "1e-4"))
     LAMBDA_POS = float(os.environ.get("LAMBDA_POS", "10.0"))
     LAMBDA_PIN = float(os.environ.get("LAMBDA_PIN", "1.0"))
@@ -178,10 +178,10 @@ def main():
     # 4. Execute Training (Adam ile kaba taslak, L-BFGS ile pürüzsüzleştirme)
     logger.info(f"Starting simulation. Reynolds Number: {REYNOLDS_NUMBER}")
     history = trainer.train(
-        adam_epochs=ADAM_EPOCHS,     # Adam epochs
-        lbfgs_epochs=LBFGS_EPOCHS,     # L-BFGS iterations
-        batch_size_int=BATCH_INTERIOR,
-        batch_size_bc=BATCH_BOUNDARY,
+        adam_epochs=ADAM_EPOCHS,
+        lbfgs_epochs=LBFGS_EPOCHS,
+        batch_size_int=BATCH_SIZE_INT, # 'batch_size_interior' YERİNE BÖYLE YAZILACAK
+        batch_size_bc=BATCH_SIZE_BC,   # 'batch_size_boundary' YERİNE BÖYLE YAZILACAK
     )
 
     # 5. Save Model Checkpoint
