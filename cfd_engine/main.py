@@ -2,45 +2,78 @@ import torch
 import logging
 import os
 import random
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-# Configure logging
+# ============================================================================
+# LOGGING CONFIGURATION
+# ============================================================================
 logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO,
+    format='%(asctime)s | %(name)s | %(levelname)-8s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.FileHandler('cfd_simulation.log'),
+        logging.StreamHandler(sys.stdout),
+    ]
 )
-logger = logging.getLogger("CFD_Engine_Main")
+logger = logging.getLogger("SciML_CFD_Engine")
 
-from src.models.networks import PINN3DEngine
-from src.physics.navier_stokes import NavierStokes3DPhysics
-from src.geometry.sdf_sampler import PipeGeometrySampler
-from src.post_processing.visualizer import CFDVisualizer
-from src.training.trainer import PINNTrainer
+from cfd_engine.src.models.networks import PINN3DEngine
+from cfd_engine.src.physics.navier_stokes import NavierStokes3DPhysics
+from cfd_engine.src.geometry.sdf_sampler import PipeGeometrySampler
+from cfd_engine.src.post_processing.visualizer import CFDVisualizer
+from cfd_engine.src.training.trainer import PINNTrainer
+
+
+# ============================================================================
+# COMPONENT INITIALIZATION
+# ============================================================================
 
 def build_simulation_components(
     reynolds_number: float,
-    inlet_velocity: float,
     radius: float,
     length: float,
-    run_id: Optional[str] = None,
-    log_dir: str = "logs",
 ) -> Dict[str, Any]:
+    """
+    Initialize all 3D PINN CFD engine components with production configuration.
+    
+    Args:
+        reynolds_number: Reynolds number for simulation
+        radius: Pipe radius in physical units
+        length: Pipe length in physical units
+    
+    Returns:
+        Dictionary containing initialized: device, model, physics, geometry, trainer, visualizer
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Initializing 3D SciML Engine on {device.type.upper()}")
-
-    seed = 42
+    logger.info(f"Initializing SciML CFD Engine on {device.type.upper()}")
+    
+    # ========================================================================
+    # RANDOMNESS CONTROL (Reproducibility)
+    # ========================================================================
+    seed = int(os.environ.get('SEED', '42'))
     torch.manual_seed(seed)
     random.seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
+    logger.info(f"Random seed set to {seed}")
+    
+    # ========================================================================
+    # GEOMETRY
+    # ========================================================================
+    geometry = PipeGeometrySampler(radius=float(radius), length=float(length))
+    logger.info(f"Geometry: Pipe radius={radius}, length={length}")
+    
+    # ========================================================================
+    # PHYSICS ENGINE
+    # ========================================================================
     spatial_weight_start = float(os.environ.get('SPATIAL_WEIGHT_START', '1.0'))
     spatial_weight_slope = float(os.environ.get('SPATIAL_WEIGHT_SLOPE', '1.0'))
     outlet_suction_strength = float(os.environ.get('OUTLET_SUCTION_STRENGTH', '5.0'))
     outlet_suction_width = float(os.environ.get('OUTLET_SUCTION_WIDTH', '0.05'))
-
-    geometry = PipeGeometrySampler(radius=float(radius), length=float(length))
+    
     physics = NavierStokes3DPhysics(
         Re=float(reynolds_number),
         spatial_weight_start=spatial_weight_start,
@@ -49,17 +82,52 @@ def build_simulation_components(
         outlet_suction_strength=outlet_suction_strength,
         outlet_suction_width=outlet_suction_width,
     )
-    model = PINN3DEngine(hidden_dim=256, num_layers=6, length=float(length), radius=float(radius)).to(device)
+    logger.info(f"Physics: Re={reynolds_number}, spatial_weight_start={spatial_weight_start}")
+    
+    # ========================================================================
+    # NEURAL NETWORK MODEL
+    # ========================================================================
+    hidden_dim = int(os.environ.get('HIDDEN_DIM', '256'))
+    num_layers = int(os.environ.get('NUM_LAYERS', '6'))
+    
+    model = PINN3DEngine(
+        hidden_dim=hidden_dim,
+        num_layers=num_layers,
+        length=float(length),
+        radius=float(radius)
+    ).to(device)
+    
+    param_count = sum(p.numel() for p in model.parameters())
+    logger.info(f"Model: PINN3DEngine with {hidden_dim}D embeddings, {num_layers} layers, {param_count:,} parameters")
+    
+    # ========================================================================
+    # TRAINER WITH PRODUCTION WEIGHTS
+    # ========================================================================
+    lr = float(os.environ.get('LR', '1e-3'))
+    lambda_bc = float(os.environ.get('LAMBDA_BC', '10000.0'))
+    lambda_smooth = float(os.environ.get('LAMBDA_SMOOTH', '100.0'))
+    lambda_radial = float(os.environ.get('LAMBDA_RADIAL', '1000.0'))
+    lambda_pos = float(os.environ.get('LAMBDA_POS', '500.0'))
+    
     trainer = PINNTrainer(
         model=model,
         physics_engine=physics,
         geometry_sampler=geometry,
         device=device,
-        lr=float(os.environ.get('LR', '1e-3')),
-        lambda_bc=float(os.environ.get('LAMBDA_BC', '10000.0')),
+        lr=lr,
+        lambda_bc=lambda_bc,
+        lambda_smooth=lambda_smooth,
+        lambda_radial=lambda_radial,
+        lambda_pos=lambda_pos,
     )
+    logger.info(f"Trainer initialized: lr={lr:.2e}, λ_bc={lambda_bc:.1e}, λ_smooth={lambda_smooth:.1e}")
+    
+    # ========================================================================
+    # VISUALIZER
+    # ========================================================================
     visualizer = CFDVisualizer(model, device)
-
+    logger.info("Visualizer initialized")
+    
     return {
         'device': device,
         'model': model,
@@ -70,49 +138,88 @@ def build_simulation_components(
     }
 
 
+# ============================================================================
+# SIMULATION EXECUTION
+# ============================================================================
+
 def run_simulation(
     reynolds_number: float,
-    inlet_velocity: float,
     radius: float,
     length: float,
-    epochs: int,
-    output_dir: str,
+    adam_epochs: int = 1600,
+    lbfgs_epochs: int = 1500,
+    batch_size_int: int = 4000,
+    batch_size_bc: int = 800,
+    output_dir: str = "output",
     run_id: Optional[str] = None,
-    batch_interior: Optional[int] = None,
-    batch_boundary: Optional[int] = None,
-    lbfgs_epochs: Optional[int] = None,
 ) -> Dict[str, Any]:
+    """
+    Execute complete 3D pipe flow PINN simulation (API interface).
+    
+    Two-stage training:
+    1. Adam: 1600 epochs with CosineAnnealingLR
+    2. L-BFGS: 1500 iterations with 1e-16 tolerances
+    
+    Args:
+        reynolds_number: Flow Reynolds number
+        radius: Pipe radius
+        length: Pipe length
+        adam_epochs: First stage epochs (default 1600)
+        lbfgs_epochs: Second stage max iterations (default 1500)
+        batch_size_int: Interior batch size (default 4000)
+        batch_size_bc: Boundary batch size (default 800)
+        output_dir: Directory for results
+        run_id: Optional run identifier
+    
+    Returns:
+        Dictionary with image_path, history, model_state_path
+    """
+    logger.info("=" * 80)
+    logger.info("STARTING FULL SIMULATION")
+    logger.info("=" * 80)
+    
+    # Build all components
     components = build_simulation_components(
         reynolds_number=reynolds_number,
-        inlet_velocity=inlet_velocity,
         radius=radius,
         length=length,
-        run_id=run_id,
-        log_dir=str(Path(output_dir) / 'logs'),
     )
     trainer: PINNTrainer = components['trainer']
-
-    adam_epochs = int(epochs)
-    lbfgs_epochs = int(lbfgs_epochs if lbfgs_epochs is not None else os.environ.get('LBFGS_EPOCHS', '100'))
-    batch_interior = int(batch_interior if batch_interior is not None else os.environ.get('BATCH_INTERIOR', '1000'))
-    batch_boundary = int(batch_boundary if batch_boundary is not None else os.environ.get('BATCH_BOUNDARY', '200'))
-
-    logger.info(f"Starting simulation. Reynolds Number: {reynolds_number}")
+    
+    # Execute two-stage training
+    logger.info("\n" + "=" * 80)
+    logger.info(f"TRAINING CONFIG: Adam={adam_epochs}e, L-BFGS={lbfgs_epochs}i, Batch(int/bc)={batch_size_int}/{batch_size_bc}")
+    logger.info("=" * 80)
+    
     history = trainer.train(
         adam_epochs=adam_epochs,
         lbfgs_epochs=lbfgs_epochs,
-        batch_size_int=batch_interior,
-        batch_size_bc=batch_boundary,
+        batch_size_int=batch_size_int,
+        batch_size_bc=batch_size_bc,
     )
-
+    
+    # Save outputs
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    model_state_path = output_path / f'pipe_flow_model_{run_id or "latest"}.pth'
+    
+    run_suffix = f"_{run_id}" if run_id else ""
+    model_state_path = output_path / f'pipe_flow_model{run_suffix}.pth'
     torch.save(components['model'].state_dict(), model_state_path)
-
-    image_path = str(output_path / 'pipe_flow_result.png')
-    components['visualizer'].plot_pipe_slice(length=float(length), radius=float(radius), save_path=image_path)
-
+    logger.info(f"Model saved: {model_state_path}")
+    
+    # Generate visualization
+    image_path = str(output_path / f'pipe_flow_result{run_suffix}.png')
+    components['visualizer'].plot_pipe_slice(
+        length=float(length),
+        radius=float(radius),
+        save_path=image_path
+    )
+    logger.info(f"Visualization saved: {image_path}")
+    
+    logger.info("=" * 80)
+    logger.info("SIMULATION COMPLETE")
+    logger.info("=" * 80)
+    
     return {
         'image_path': image_path,
         'history': history,
@@ -120,77 +227,133 @@ def run_simulation(
     }
 
 
+# ============================================================================
+# COMMAND-LINE INTERFACE
+# ============================================================================
+
 def main():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Initializing 3D SciML Engine on {device.type.upper()}")
-
-    # Deterministic seed for reproducibility (can be changed per-run)
-    seed = 42
-    torch.manual_seed(seed)
-    random.seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-    # 1. Configuration (can be overridden with environment variables)
-    EPOCHS = int(os.environ.get("EPOCHS", "1000"))
-    REYNOLDS_NUMBER = float(os.environ.get("RE", "100.0"))
-    ADAM_EPOCHS = int(os.environ.get("ADAM_EPOCHS", "1600"))
-    LBFGS_EPOCHS = int(os.environ.get("LBFGS_EPOCHS", "100"))
-    BATCH_SIZE_INT = int(os.environ.get("BATCH_INTERIOR", "1000"))
-    BATCH_SIZE_BC = int(os.environ.get("BATCH_BOUNDARY", "200"))
-    NTK_REG_WEIGHT = float(os.environ.get("NTK_REG_WEIGHT", "1e-4"))
-    LAMBDA_POS = float(os.environ.get("LAMBDA_POS", "10.0"))
-    LAMBDA_PIN = float(os.environ.get("LAMBDA_PIN", "1.0"))
-    LAMBDA_BC = float(os.environ.get("LAMBDA_BC", "10000.0"))
-    LAMBDA_TARGET_VEL = float(os.environ.get("LAMBDA_TARGET_VEL", "1000.0"))
-    LAMBDA_INLET = float(os.environ.get("LAMBDA_INLET", "100.0"))
-    INLET_VELOCITY = float(os.environ.get("INLET_VELOCITY", "1.0"))
+    """
+    Production CLI entry point for 3D PINN pipe flow simulation.
     
-    # 2. Initialize Core Modules
+    All parameters configurable via environment variables:
+    
+    GEOMETRY:
+        RE=100.0              Reynolds number
+        RADIUS=0.5            Pipe radius
+        LENGTH=3.0            Pipe length
+    
+    TRAINING (Stage 1 - Adam):
+        ADAM_EPOCHS=1600      Number of Adam optimization epochs
+        LR=1e-3               Learning rate
+    
+    TRAINING (Stage 2 - L-BFGS):
+        LBFGS_EPOCHS=1500     Max L-BFGS iterations
+    
+    BATCHING:
+        BATCH_INTERIOR=4000   Interior collocation points/batch
+        BATCH_BOUNDARY=800    Boundary collocation points/batch
+    
+    LOSS WEIGHTS:
+        LAMBDA_RADIAL=1000.0      Radial guide penalty (prevents needle)
+        LAMBDA_POS=500.0          Positivity penalty (u_x >= 0)
+        LAMBDA_SMOOTH=100.0       Axial smoothness penalty (kills aliasing)
+        LAMBDA_BC=10000.0         Boundary condition penalty
+    
+    PHYSICS:
+        SPATIAL_WEIGHT_START=1.0      Initial spatial weighting
+        SPATIAL_WEIGHT_SLOPE=1.0      Spatial weight slope
+        OUTLET_SUCTION_STRENGTH=5.0   Outlet BC strength
+        OUTLET_SUCTION_WIDTH=0.05     Outlet BC width
+    
+    MODEL:
+        HIDDEN_DIM=256        Fourier embedding dimension
+        NUM_LAYERS=6          Number of MLP layers
+    
+    OTHER:
+        SEED=42               Random seed for reproducibility
+        LOGDIR=logs           Log directory
+        RUN_ID=                Optional run identifier suffix
+    """
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info("\n" + "=" * 80)
+    logger.info("SciML CFD ENGINE - PRODUCTION PIPE FLOW SOLVER")
+    logger.info("=" * 80)
+    logger.info(f"Device: {device.type.upper()}")
+    
+    # ========================================================================
+    # LOAD CONFIGURATION FROM ENVIRONMENT
+    # ========================================================================
+    
+    # Geometry
+    reynolds_number = float(os.environ.get('RE', '100.0'))
     radius = float(os.environ.get('RADIUS', '0.5'))
     length = float(os.environ.get('LENGTH', '3.0'))
-    model = PINN3DEngine(hidden_dim=256, num_layers=6, length=length, radius=radius).to(device)
-    spatial_weight_start = float(os.environ.get('SPATIAL_WEIGHT_START', '1.0'))
-    spatial_weight_slope = float(os.environ.get('SPATIAL_WEIGHT_SLOPE', '1.0'))
-    outlet_suction_strength = float(os.environ.get('OUTLET_SUCTION_STRENGTH', '5.0'))
-    outlet_suction_width = float(os.environ.get('OUTLET_SUCTION_WIDTH', '0.05'))
-    geometry = PipeGeometrySampler(radius=radius, length=length)
-    physics = NavierStokes3DPhysics(
-        Re=REYNOLDS_NUMBER,
-        spatial_weight_start=spatial_weight_start,
-        spatial_weight_slope=spatial_weight_slope,
-        pipe_length=length,
-        outlet_suction_strength=outlet_suction_strength,
-        outlet_suction_width=outlet_suction_width,
+    
+    # Training - Adam stage
+    adam_epochs = int(os.environ.get('ADAM_EPOCHS', '1600'))
+    lbfgs_epochs = int(os.environ.get('LBFGS_EPOCHS', '1500'))
+    
+    # Batching
+    batch_size_int = int(os.environ.get('BATCH_INTERIOR', '4000'))
+    batch_size_bc = int(os.environ.get('BATCH_BOUNDARY', '800'))
+    
+    logger.info(f"Geometry: Re={reynolds_number}, R={radius}, L={length}")
+    logger.info(f"Training: Adam={adam_epochs}e, L-BFGS={lbfgs_epochs}i")
+    logger.info(f"Batching: Interior={batch_size_int}, BC={batch_size_bc}")
+    
+    # ========================================================================
+    # BUILD COMPONENTS
+    # ========================================================================
+    components = build_simulation_components(
+        reynolds_number=reynolds_number,
+        radius=radius,
+        length=length,
     )
-
-    # 3. Setup Trainer
-    log_dir = os.environ.get("LOGDIR", "logs")
-    trainer = PINNTrainer(
-        model=model,
-        physics_engine=physics,
-        geometry_sampler=geometry,
-        device=device,
-        lr=float(os.environ.get('LR', '1e-3')),
-        lambda_bc=LAMBDA_BC,
-    )
-
-    # 4. Execute Training (Adam ile kaba taslak, L-BFGS ile pürüzsüzleştirme)
-    logger.info(f"Starting simulation. Reynolds Number: {REYNOLDS_NUMBER}")
+    trainer: PINNTrainer = components['trainer']
+    model = components['model']
+    
+    # ========================================================================
+    # EXECUTE TRAINING
+    # ========================================================================
+    logger.info("\n" + "█" * 80)
+    logger.info("STARTING TWO-STAGE OPTIMIZATION")
+    logger.info("█" * 80)
+    
     history = trainer.train(
-        adam_epochs=ADAM_EPOCHS,
-        lbfgs_epochs=LBFGS_EPOCHS,
-        batch_size_int=BATCH_SIZE_INT, # 'batch_size_interior' YERİNE BÖYLE YAZILACAK
-        batch_size_bc=BATCH_SIZE_BC,   # 'batch_size_boundary' YERİNE BÖYLE YAZILACAK
+        adam_epochs=adam_epochs,
+        lbfgs_epochs=lbfgs_epochs,
+        batch_size_int=batch_size_int,
+        batch_size_bc=batch_size_bc,
     )
-
-    # 5. Save Model Checkpoint
+    
+    # ========================================================================
+    # SAVE AND VISUALIZE RESULTS
+    # ========================================================================
     os.makedirs("checkpoints", exist_ok=True)
     run_id = os.environ.get('RUN_ID', '')
     suffix = f"_{run_id}" if run_id else ""
-    save_path = f"checkpoints/pipe_flow_model{suffix}.pth"
-    torch.save(model.state_dict(), save_path)
-    logger.info(f"Model weights saved to {save_path}")
+    
+    model_path = f"checkpoints/pipe_flow_model{suffix}.pth"
+    torch.save(model.state_dict(), model_path)
+    logger.info(f"\n✓ Model saved to: {model_path}")
+    
+    try:
+        image_path = f"output/pipe_flow_visualization{suffix}.png"
+        os.makedirs("output", exist_ok=True)
+        components['visualizer'].plot_pipe_slice(
+            length=length,
+            radius=radius,
+            save_path=image_path
+        )
+        logger.info(f"✓ Visualization saved to: {image_path}")
+    except Exception as e:
+        logger.warning(f"Visualization generation failed: {e}")
+    
+    logger.info("\n" + "=" * 80)
+    logger.info("TRAINING COMPLETED SUCCESSFULLY")
+    logger.info("=" * 80)
+
 
 if __name__ == "__main__":
     main()
