@@ -9,6 +9,13 @@ class CFDVisualizer:
     def __init__(self, model, device):
         self.model = model
         self.device = device
+        assert hasattr(self.model, 'hidden_dim') and hasattr(self.model, 'num_layers'), (
+            'Model metadata missing: expected attributes hidden_dim and num_layers from networks.py.'
+        )
+        assert len(list(self.model.net)) == self.model.num_layers * 2 + 1, (
+            'Model sequential structure does not match expected networks.py architecture.'
+        )
+        logger.info(f'Visualizer model check: hidden_dim={self.model.hidden_dim}, num_layers={self.model.num_layers}')
         self.model.eval() # Modeli test moduna alıyoruz (dropout vb. kapanır)
 
     def plot_pipe_slice(self, length: float, radius: float, save_path: str = "pipe_flow_result.png"):

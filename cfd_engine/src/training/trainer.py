@@ -29,6 +29,8 @@ class PINNTrainer:
         lambda_pin: float = 1.0,
         lambda_pos: float = 10.0,
         lambda_target_vel: float = 1000.0,
+        lambda_inlet: float = 100.0,
+        inlet_velocity: float = 1.0,
         pump_force_max: float = 0.1,
         pump_ramp_epochs: int = 200,
         run_id: Optional[str] = None,
@@ -43,11 +45,12 @@ class PINNTrainer:
 
         self.adam_optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
         self.writer = SummaryWriter(log_dir) if log_dir is not None else None
-        self.inlet_velocity = 1.0
+        self.inlet_velocity = inlet_velocity
         self.ntk_reg_weight = ntk_reg_weight
         self.lambda_pin = lambda_pin
         self.lambda_pos = lambda_pos
         self.lambda_target_vel = lambda_target_vel
+        self.lambda_inlet = lambda_inlet
         self.pump_force_max = pump_force_max
         self.pump_ramp_epochs = pump_ramp_epochs
         self.run_id = run_id if run_id is not None else ""
@@ -93,7 +96,7 @@ class PINNTrainer:
             R = getattr(self.geometry, 'radius', 1.0)
             u_profile = self.inlet_velocity * torch.clamp(1.0 - (r_in / R) ** 2, min=0.0)
             loss_inlet = torch.mean((preds_inlet[:, 0:1] - u_profile) ** 2 + preds_inlet[:, 1:2] ** 2 + preds_inlet[:, 2:3] ** 2)
-            
+            loss_inlet = self.lambda_inlet * loss_inlet
 
             # Pressure pinning at outlet (x = length)
             L = getattr(self.geometry, 'length', 1.0)
@@ -230,6 +233,7 @@ class PINNTrainer:
                 R = getattr(self.geometry, 'radius', 1.0)
                 u_profile = self.inlet_velocity * torch.clamp(1.0 - (r_in / R) ** 2, min=0.0)
                 loss_inlet = torch.mean((preds_inlet[:, 0:1] - u_profile) ** 2 + preds_inlet[:, 1:2] ** 2 + preds_inlet[:, 2:3] ** 2)
+                loss_inlet = self.lambda_inlet * loss_inlet
                 # pressure pinning (outlet)
                 L = getattr(self.geometry, 'length', 1.0)
                 x_out = torch.full((curr_inlet.shape[0], 1), float(L), device=self.device)

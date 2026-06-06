@@ -38,14 +38,17 @@ def main():
     LAMBDA_PIN = float(os.environ.get("LAMBDA_PIN", "1.0"))
     LAMBDA_BC = float(os.environ.get("LAMBDA_BC", "10000.0"))
     LAMBDA_TARGET_VEL = float(os.environ.get("LAMBDA_TARGET_VEL", "1000.0"))
+    LAMBDA_INLET = float(os.environ.get("LAMBDA_INLET", "100.0"))
     INLET_VELOCITY = float(os.environ.get("INLET_VELOCITY", "1.0"))
     
     # 2. Initialize Core Modules
-    model = PINN3DEngine(hidden_dim=256, num_layers=6).to(device)
+    radius = float(os.environ.get('RADIUS', '0.5'))
+    length = float(os.environ.get('LENGTH', '3.0'))
+    model = PINN3DEngine(hidden_dim=256, num_layers=6, length=length, radius=radius).to(device)
     spatial_weight_start = float(os.environ.get('SPATIAL_WEIGHT_START', '1.0'))
     spatial_weight_slope = float(os.environ.get('SPATIAL_WEIGHT_SLOPE', '1.0'))
     physics = NavierStokes3DPhysics(Re=REYNOLDS_NUMBER, spatial_weight_start=spatial_weight_start, spatial_weight_slope=spatial_weight_slope)
-    geometry = PipeGeometrySampler(radius=float(os.environ.get('RADIUS', '0.5')), length=float(os.environ.get('LENGTH', '3.0')))
+    geometry = PipeGeometrySampler(radius=radius, length=length)
 
     # 3. Setup Trainer
     log_dir = os.environ.get("LOGDIR", "logs")
@@ -56,7 +59,9 @@ def main():
         device=device,
         lr=float(os.environ.get('LR', '1e-3')),
         lambda_bc=LAMBDA_BC,
+        inlet_velocity=INLET_VELOCITY,
         lambda_target_vel=LAMBDA_TARGET_VEL,
+        lambda_inlet=LAMBDA_INLET,
         log_dir=log_dir,
         ntk_check_interval=int(os.environ.get('NTK_CHECK_INTERVAL', '1000')),
         ntk_reg_weight=NTK_REG_WEIGHT,
