@@ -14,22 +14,22 @@ class PINNTrainer:
     Production-grade PINN Trainer for 3D pipe flow with spatial aliasing suppression.
     
     Two-stage optimization pipeline:
-    1. Adam (1600 epochs) with CosineAnnealingLR scheduler for coarse fit
-    2. L-BFGS (1500 max iterations) with ultra-tight tolerances for fine refinement
+    1. Adam with CosineAnnealingLR scheduler for coarse fit
+    2. L-BFGS with ultra-tight tolerances for fine refinement
     
-    Loss architecture (Golden Ratio Tuning - Balanced Poiseuille Flow):
-    - PDE (Continuity × 100 + Momentum)
-    - Radial Guide (× 250): balanced guide toward parabolic profile
-    - Positivity (× 500): ensures u_x ≥ 0 everywhere
-    - Axial Smoothness (× 40): optimal regularization for smooth gradients
-    - Boundary Conditions (× λ_bc=15000): strict wall no-slip enforcement
+    Loss architecture (Golden Ratio Tuning — Dikey Çizgi Bastırma):
+      pde_loss  = 100 × l_cont + 100 × l_mom   ← momentum 100× spatial aliasing'i yok eder
+      total     = pde_loss
+                + 20.0  × l_radial              ← parabolün doğal oluşması için gevşetildi
+                + 500.0 × l_pos                 ← u_x ≥ 0 güvencesi
+                + 5.0   × l_smooth              ← du/dx L2 normu (eksenel pürüzsüzlük)
+                + λ_bc  × (l_wall + l_in + l_out)
     
-    Physics basis:
-    - Radial guide 250× (sweet spot): not too harsh to stifle physics, not too weak to lose profile
-    - Wall BC 15000× ensures u=0 at r=R (no wall slip) - maintains blue dissipation at walls
-    - Smoothness 40× (optimal): prevents aliasing without over-constraining radial curvature
+    NTK Spektrum Bağlantısı (Makale Bölüm 3.1):
+    - Momentum ağırlığı 100× → yüksek-frekanslı mod bastırması = NTK koşul sayısını düşürür
+    - du/dx L2 normu → tam gelişmiş akışın fiziksel kısıtı (Poiseuille: du/dx = 0)
     """
-    
+
     def __init__(
         self,
         model: nn.Module,
@@ -38,24 +38,18 @@ class PINNTrainer:
         device: torch.device,
         lr: float = 1e-3,
         lambda_bc: float = 15000.0,
-        lambda_smooth: float = 40.0,
-        lambda_radial: float = 250.0,
-        lambda_pos: float = 500.0,
     ):
         self.model = model
         self.physics = physics_engine
         self.geometry = geometry_sampler
         self.device = device
         self.lambda_bc = lambda_bc
-        self.lambda_smooth = lambda_smooth      # Axial smoothness penalty weight
-        self.lambda_radial = lambda_radial      # Radial guide penalty weight
-        self.lambda_pos = lambda_pos            # Positivity penalty weight
-        
+
         # Adam optimizer with CosineAnnealingLR scheduler
         self.adam_optimizer = optim.Adam(self.model.parameters(), lr=lr)
         # Scheduler will be created in train() method
         self.scheduler = None
-        
+
         # Training history tracking
         self.loss_history = {
             'total': [], 'pde': [], 'radial': [], 'positivity': [],
@@ -127,32 +121,25 @@ class PINNTrainer:
 
     def _compute_axial_smoothness_loss(self, int_pts: torch.Tensor) -> torch.Tensor:
         """
-        Axial Total Variation Loss: Penalizes sudden changes in du/dx (velocity gradient).
-        
-        PHYSICAL MOTIVATION: Spatial aliasing artifacts in the visualization appear as vertical lines
-        because the neural network's du/dx has sharp local discontinuities. By penalizing the second
-        derivative d²u/dx² (curvature of the velocity gradient), we force smooth variations along x.
-        
-        Implementation:
-        1. Forward pass through interior points (with gradient tracking)
-        2. Compute du/dx via autograd
-        3. Compute d²u/dx² by differentiating du/dx
-        4. Take L2 norm of d²u/dx² as penalty
-        
-        Weight: λ_smooth = 100× (sufficient to suppress aliasing without over-regularization)
-        
+        Axial Smoothness Loss: L2 normu of du/dx.
+
+        Tam gelişmiş Poiseuille akışında eksenel hız değişmez → du/dx = 0 everywhere.
+        mean((du/dx)^2) bu fiziksel kısıtı doğrudan uygular; görselleştirmedeki
+        dikey çizgi (spatial aliasing) artefaktlarını bastırır.
+
+        Weight: 5.0× (yeterli bastırma, radyal eğriyi kısıtlamadan)
+
         Args:
             int_pts: (N, 3) interior points [x, y, z]
-        
+
         Returns:
-            Scalar smoothness loss
+            Scalar smoothness loss = mean((du/dx)^2)
         """
         int_pts_req = int_pts.clone().detach().requires_grad_(True)
         preds = self.model(int_pts_req)
         u_pred = preds[:, 0:1]
-        
+
         try:
-            # First derivative: du/dx
             du_dx = torch.autograd.grad(
                 outputs=u_pred.sum(),
                 inputs=int_pts_req,
@@ -160,32 +147,17 @@ class PINNTrainer:
                 retain_graph=True,
                 allow_unused=True,
             )[0]
-            
+
             if du_dx is None:
-                # Fallback if gradient is None
                 return torch.tensor(0.0, device=self.device, dtype=torch.float32)
-            
-            du_dx = du_dx[:, 0:1]  # Extract d/dx component
-            
-            # Second derivative: d²u/dx² (curvature penalty)
-            d2u_dx2 = torch.autograd.grad(
-                outputs=du_dx.sum(),
-                inputs=int_pts_req,
-                create_graph=False,
-                retain_graph=True,
-                allow_unused=True,
-            )[0]
-            
-            if d2u_dx2 is None:
-                return torch.tensor(0.0, device=self.device, dtype=torch.float32)
-            
-            d2u_dx2 = d2u_dx2[:, 0:1]
-            smoothness_loss = torch.mean(d2u_dx2 ** 2)
-            
+
+            du_dx_x = du_dx[:, 0:1]  # d/dx bileşeni
+            smoothness_loss = torch.mean(du_dx_x ** 2)
+
         except RuntimeError as e:
             logger.warning(f"Gradient computation failed in axial smoothness loss: {e}")
             return torch.tensor(0.0, device=self.device, dtype=torch.float32)
-        
+
         return smoothness_loss
 
     def train(
@@ -232,8 +204,8 @@ class PINNTrainer:
         logger.info("STAGE 1: Adam Optimization with CosineAnnealingLR Scheduler")
         logger.info("=" * 80)
         logger.info(f"Epochs: {adam_epochs} | Batch(Interior): {batch_size_int} | Batch(BC): {batch_size_bc}")
-        logger.info(f"Loss weights: λ_bc={self.lambda_bc:.1e}, λ_radial={self.lambda_radial:.1e}, " 
-                   f"λ_pos={self.lambda_pos:.1e}, λ_smooth={self.lambda_smooth:.1e}")
+        logger.info(f"Loss weights: λ_bc={self.lambda_bc:.1e} | PDE=100×(cont+mom) | "
+                    f"λ_radial=20.0 | λ_pos=500.0 | λ_smooth=5.0")
         
         stage1_start_time = time.time()
         
@@ -251,10 +223,9 @@ class PINNTrainer:
             # COMPUTE ALL LOSSES
             # ============================================================================
             
-            # 1. PDE Loss (Continuity + Momentum)
+            # 1. PDE Loss — her iki terim 100× (momentum ağırlığı spatial aliasing'i yok eder)
             l_cont, l_mom = self.physics.compute_pde_loss(self.model, int_pts)
-            # CRITICAL: Continuity × 100 prevents needle artifact by enforcing mass conservation
-            pde_loss = (100.0 * l_cont) + l_mom
+            pde_loss = (100.0 * l_cont) + (100.0 * l_mom)
             
             # 2. Interior Point Losses (Radial Guide, Positivity, Smoothness)
             preds_int = self.model(int_pts)
@@ -280,15 +251,15 @@ class PINNTrainer:
             l_out = torch.mean(self.model(out_pts)[:, 3:4] ** 2)
             
             # ============================================================================
-            # COMBINE LOSSES WITH PRODUCTION WEIGHTS
+            # COMBINE LOSSES — Altın Oran Kalibrasyonu
             # ============================================================================
             l_bc_total = self.lambda_bc * (l_wall + l_in + l_out)
-            
+
             total_loss = (
                 pde_loss
-                + self.lambda_radial * l_radial
-                + self.lambda_pos * l_pos
-                + self.lambda_smooth * l_smooth
+                + (20.0  * l_radial)
+                + (500.0 * l_pos)
+                + (5.0   * l_smooth)
                 + l_bc_total
             )
             
@@ -362,26 +333,26 @@ class PINNTrainer:
             
             # Compute all losses
             l_cont, l_mom = self.physics.compute_pde_loss(self.model, int_pts_b)
-            pde_loss = (100.0 * l_cont) + l_mom
-            
+            pde_loss = (100.0 * l_cont) + (100.0 * l_mom)
+
             preds_int = self.model(int_pts_b)
             u_pred_int = preds_int[:, 0:1]
-            
+
             l_pos = torch.mean(torch.relu(-u_pred_int))
             l_radial = self._compute_radial_guide_loss(preds_int, int_pts_b)
             l_smooth = self._compute_axial_smoothness_loss(int_pts_b)
-            
+
             l_wall = torch.mean(self.model(bc_pts_b)[:, 0:3] ** 2)
             l_in = self._compute_inlet_loss(self.model(in_pts_b), in_pts_b)
             l_out = torch.mean(self.model(out_pts_b)[:, 3:4] ** 2)
-            
+
             l_bc_total = self.lambda_bc * (l_wall + l_in + l_out)
-            
+
             total_loss = (
                 pde_loss
-                + self.lambda_radial * l_radial
-                + self.lambda_pos * l_pos
-                + self.lambda_smooth * l_smooth
+                + (20.0  * l_radial)
+                + (500.0 * l_pos)
+                + (5.0   * l_smooth)
                 + l_bc_total
             )
             

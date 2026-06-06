@@ -104,11 +104,8 @@ def build_simulation_components(
     # TRAINER WITH PRODUCTION WEIGHTS (Golden Ratio Tuning for Poiseuille)
     # ========================================================================
     lr = float(os.environ.get('LR', '1e-3'))
-    lambda_bc = float(os.environ.get('LAMBDA_BC', '15000.0'))       # Strict wall BC (no slip)
-    lambda_smooth = float(os.environ.get('LAMBDA_SMOOTH', '40.0'))  # Optimal smoothing
-    lambda_radial = float(os.environ.get('LAMBDA_RADIAL', '250.0')) # Sweet spot radial guide
-    lambda_pos = float(os.environ.get('LAMBDA_POS', '500.0'))
-    
+    lambda_bc = float(os.environ.get('LAMBDA_BC', '15000.0'))  # Strict wall BC (no slip)
+
     trainer = PINNTrainer(
         model=model,
         physics_engine=physics,
@@ -116,11 +113,9 @@ def build_simulation_components(
         device=device,
         lr=lr,
         lambda_bc=lambda_bc,
-        lambda_smooth=lambda_smooth,
-        lambda_radial=lambda_radial,
-        lambda_pos=lambda_pos,
     )
-    logger.info(f"Trainer initialized: lr={lr:.2e}, λ_bc={lambda_bc:.1e}, λ_smooth={lambda_smooth:.1e}, λ_radial={lambda_radial:.1e}")
+    logger.info(f"Trainer initialized: lr={lr:.2e}, λ_bc={lambda_bc:.1e} | "
+                f"Hardcoded: λ_radial=20.0, λ_pos=500.0, λ_smooth=5.0 | PDE=100×(cont+mom)")
     
     # ========================================================================
     # VISUALIZER
@@ -146,8 +141,8 @@ def run_simulation(
     reynolds_number: float,
     radius: float,
     length: float,
-    adam_epochs: int = 1600,
-    lbfgs_epochs: int = 1500,
+    adam_epochs: int = 2000,
+    lbfgs_epochs: int = 1000,
     batch_size_int: int = 4000,
     batch_size_bc: int = 800,
     output_dir: str = "output",
@@ -157,15 +152,15 @@ def run_simulation(
     Execute complete 3D pipe flow PINN simulation (API interface).
     
     Two-stage training:
-    1. Adam: 1600 epochs with CosineAnnealingLR
-    2. L-BFGS: 1500 iterations with 1e-16 tolerances
+    1. Adam: 2000 epochs with CosineAnnealingLR
+    2. L-BFGS: 1000 iterations with 1e-16 tolerances
     
     Args:
         reynolds_number: Flow Reynolds number
         radius: Pipe radius
         length: Pipe length
-        adam_epochs: First stage epochs (default 1600)
-        lbfgs_epochs: Second stage max iterations (default 1500)
+        adam_epochs: First stage epochs (default 2000)
+        lbfgs_epochs: Second stage max iterations (default 1000)
         batch_size_int: Interior batch size (default 4000)
         batch_size_bc: Boundary batch size (default 800)
         output_dir: Directory for results
@@ -238,25 +233,26 @@ def main():
     All parameters configurable via environment variables:
     
     GEOMETRY:
-        RE=100.0              Reynolds number
+        RE=50.0               Reynolds number (laminar Poiseuille)
         RADIUS=0.5            Pipe radius
         LENGTH=3.0            Pipe length
     
     TRAINING (Stage 1 - Adam):
-        ADAM_EPOCHS=1600      Number of Adam optimization epochs
+        ADAM_EPOCHS=2000      Number of Adam optimization epochs
         LR=1e-3               Learning rate
     
     TRAINING (Stage 2 - L-BFGS):
-        LBFGS_EPOCHS=1500     Max L-BFGS iterations
+        LBFGS_EPOCHS=1000     Max L-BFGS iterations
     
     BATCHING:
         BATCH_INTERIOR=4000   Interior collocation points/batch
         BATCH_BOUNDARY=800    Boundary collocation points/batch
     
-    LOSS WEIGHTS (Golden Ratio Tuning for Poiseuille):
-        LAMBDA_RADIAL=250.0       Sweet spot radial guide (balanced)
-        LAMBDA_POS=500.0          Positivity penalty (u_x >= 0)
-        LAMBDA_SMOOTH=40.0        Optimal axial smoothness (anti-aliasing)
+    LOSS WEIGHTS (Hardcoded — Altın Oran Kalibrasyonu):
+        PDE = 100×cont + 100×mom  (momentum 100× → dikey çizgileri bastırır)
+        λ_radial=20.0             Parabolün doğal oluşması (gevşetildi)
+        λ_pos=500.0               Positivity penalty (u_x >= 0)
+        λ_smooth=5.0              du/dx L2 normu (Poiseuille kısıtı)
         LAMBDA_BC=15000.0         Strict wall BC enforcement (u=0 at r=R)
     
     PHYSICS:
@@ -286,13 +282,13 @@ def main():
     # ========================================================================
     
     # Geometry
-    reynolds_number = float(os.environ.get('RE', '100.0'))
+    reynolds_number = float(os.environ.get('RE', '50.0'))
     radius = float(os.environ.get('RADIUS', '0.5'))
     length = float(os.environ.get('LENGTH', '3.0'))
-    
+
     # Training - Adam stage
-    adam_epochs = int(os.environ.get('ADAM_EPOCHS', '1600'))
-    lbfgs_epochs = int(os.environ.get('LBFGS_EPOCHS', '1500'))
+    adam_epochs = int(os.environ.get('ADAM_EPOCHS', '2000'))
+    lbfgs_epochs = int(os.environ.get('LBFGS_EPOCHS', '1000'))
     
     # Batching
     batch_size_int = int(os.environ.get('BATCH_INTERIOR', '4000'))
@@ -301,7 +297,7 @@ def main():
     logger.info(f"Geometry: Re={reynolds_number}, R={radius}, L={length}")
     logger.info(f"Training: Adam={adam_epochs}e, L-BFGS={lbfgs_epochs}i")
     logger.info(f"Batching: Interior={batch_size_int}, BC={batch_size_bc}")
-    logger.info(f"Loss Weights (Golden Ratio): λ_bc=15000.0, λ_radial=250.0, λ_smooth=40.0, λ_pos=500.0")
+    logger.info(f"Loss Weights (Golden Ratio): λ_bc=15000.0 | PDE=100×(cont+mom) | λ_radial=20.0 | λ_smooth=5.0 | λ_pos=500.0")
     
     # ========================================================================
     # BUILD COMPONENTS
