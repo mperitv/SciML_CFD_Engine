@@ -37,18 +37,24 @@ class PINN3DEngine(nn.Module):
                 nn.init.zeros_(m.bias)
 
     def forward(self, coords: torch.Tensor) -> torch.Tensor:
-        # HATA DÜZELTME: In-place operation yerine 'torch.cat' kullanarak türev zincirini koruyoruz.
+        """
+        Koordinatları [-1, 1] aralığına güvenli (out-of-place) bir şekilde normalize eder.
+        Bu yöntem PyTorch'un türev zincirini bozmaz.
+        """
+        # Koordinatları parçalarına ayır (Slicing)
         x = coords[:, 0:1]
         y = coords[:, 1:2]
         z = coords[:, 2:3]
         
-        # Koordinatları [-1, 1] aralığına güvenli bir şekilde çekiyoruz
+        # Normalizasyon işlemlerini yeni değişkenlerde yap (Autograd-safe)
+        # x: [0, L] -> [-1, 1]
         x_n = (x / self.length) * 2.0 - 1.0
+        # y, z: [-R, R] -> [-1, 1]
         y_n = y / self.radius
         z_n = z / self.radius
         
-        # Yeni bir tensör oluşturarak birleştiriyoruz (Autograd dostu)
+        # Parçaları yeni bir tensör olarak birleştir (torch.cat)
         coords_norm = torch.cat([x_n, y_n, z_n], dim=1)
         
-        # Makalendeki Fourier Embedding katmanına besliyoruz
+        # Makalendeki Fourier Embedding katmanına besle ve MLP'den geçir
         return self.net(self.embedding(coords_norm))
