@@ -28,7 +28,7 @@ def main():
 
     # 1. Configuration (can be overridden with environment variables)
     EPOCHS = int(os.environ.get("EPOCHS", "1000"))
-    REYNOLDS_NUMBER = float(os.environ.get("RE", "50.0"))
+    REYNOLDS_NUMBER = float(os.environ.get("RE", "100.0"))
     ADAM_EPOCHS = int(os.environ.get("ADAM_EPOCHS", "1600"))
     LBFGS_EPOCHS = int(os.environ.get("LBFGS_EPOCHS", "100"))
     BATCH_INTERIOR = int(os.environ.get("BATCH_INTERIOR", "1000"))

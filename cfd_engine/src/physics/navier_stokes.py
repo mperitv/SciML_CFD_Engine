@@ -1,7 +1,10 @@
 import numpy as np
 import torch
 import torch.nn as nn
+import logging
 from typing import Tuple, Dict, List
+
+logger = logging.getLogger(__name__)
 
 
 class NavierStokes3DPhysics:
@@ -30,6 +33,11 @@ class NavierStokes3DPhysics:
     ):
         self.Re = Re
         self.nu = 1.0 / Re
+        if self.Re > 2000:
+            logger.warning(
+                "Steady-State solver is not physically valid for turbulent flows (Re > 2000). "
+                "Expect non-convergence or add time (t) dependency."
+            )
         # Spatial weighting for curriculum learning (weights applied to PDE residuals)
         self.spatial_weight_start = spatial_weight_start
         self.spatial_weight_slope = spatial_weight_slope

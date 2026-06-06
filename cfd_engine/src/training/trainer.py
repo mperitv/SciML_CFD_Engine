@@ -271,17 +271,6 @@ class PINNTrainer:
 
                 total_loss = weight_pde * pde_loss + self.lambda_bc * bc_loss + self.lambda_target_vel * loss_target
 
-                # small NTK regularizer during L-BFGS closure
-                try:
-                    sample_pts = self.geometry.sample_interior(min(64, curr_interior.shape[0]), self.device)
-                    K = self.physics.compute_empirical_ntk(self.model, sample_pts, output_index=0, max_points=32)
-                    eigenvalues = torch.linalg.eigvalsh(K)
-                    small = torch.clamp(eigenvalues[eigenvalues > 0.0], min=1e-12)
-                    lambda_min = small.min() if small.numel() > 0 else torch.tensor(1e-12, device=self.device)
-                    total_loss = total_loss + float(self.ntk_reg_weight) / (lambda_min + 1e-12)
-                except Exception:
-                    pass
-
                 total_loss.backward()
 
                 logger.info(f"L-BFGS Step Loss: {total_loss.item():.4e}")
