@@ -144,8 +144,8 @@ def run_simulation(
     reynolds_number: float,
     radius: float,
     length: float,
-    adam_epochs: int = 2000,
-    lbfgs_epochs: int = 1000,
+    adam_epochs: int = 4000,
+    lbfgs_epochs: int = 3000,
     batch_size_int: int = 4000,
     batch_size_bc: int = 800,
     warmup_epochs: int = 500,
@@ -299,8 +299,8 @@ def main():
     length = float(os.environ.get('LENGTH', '3.0'))
 
     # Training schedule
-    adam_epochs   = int(os.environ.get('ADAM_EPOCHS',   '2000'))
-    lbfgs_epochs  = int(os.environ.get('LBFGS_EPOCHS',  '1000'))
+    adam_epochs   = int(os.environ.get('ADAM_EPOCHS',   '4000'))   # 500 warmup + 3500 physics
+    lbfgs_epochs  = int(os.environ.get('LBFGS_EPOCHS',  '3000'))   # full refinement
     warmup_epochs = int(os.environ.get('WARMUP_EPOCHS', '500'))
 
     # Batching

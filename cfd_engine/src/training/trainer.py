@@ -87,16 +87,18 @@ from typing import Dict, Optional
 logger = logging.getLogger(__name__)
 
 # ── Loss weights ──────────────────────────────────────────────────────────────
-WEIGHT_RADIAL:     float = 100.0   # radial guide: MSE(u, Poiseuille)
-WEIGHT_SMOOTH:     float = 20.0    # axial smoothness: mean(|du/dx|²)
-WEIGHT_POSITIVITY: float = 500.0   # no backflow: mean(relu(-u)²)
+WEIGHT_RADIAL:      float = 100.0  # u shape guide — keep HIGH (reducing to 30 killed propagation)
+WEIGHT_SMOOTH:      float = 20.0   # axial smoothness: mean(|du/dx|²)
+WEIGHT_POSITIVITY:  float = 500.0  # no backflow
+WEIGHT_P_INTERIOR:  float = 50.0   # interior pressure supervision: p=(8ν/R²)*(L-x)
+WEIGHT_VW_INTERIOR: float = 50.0   # interior v=w=0 supervision (transverse flow prevention)
 
 # ── Wang2021 config ───────────────────────────────────────────────────────────
 LAMBDA_BC_INIT:   float = 1.0
 LAMBDA_BC_MIN:    float = 0.1
-LAMBDA_BC_MAX:    float = 20.0
+LAMBDA_BC_MAX:    float = 50.0    # balanced: was 20 (too low → outlet p=0.18), was 100 (too high → instability)
 GRAD_DENOM_FLOOR: float = 1e-6
-WANG_UPDATE_FREQ: int   = 5        # every 5 steps (user spec)
+WANG_UPDATE_FREQ: int   = 5
 WANG_ALPHA:       float = 0.1
 
 # ── Training config ───────────────────────────────────────────────────────────
@@ -134,10 +136,11 @@ class PINNTrainer:
         self._step = 0
 
         self.loss_history: Dict[str, list] = {
-            'warmup':     [],
-            'total':      [], 'pde':        [], 'bc':         [],
-            'radial':     [], 'smooth':      [], 'positivity': [],
-            'lambda_bc':  [], 'continuity':  [], 'momentum':   [],
+            'warmup':      [],
+            'total':       [], 'pde':        [], 'bc':          [],
+            'radial':      [], 'smooth':     [], 'positivity':  [],
+            'p_interior':  [], 'vw_interior':[], 'lambda_bc':   [],
+            'continuity':  [], 'momentum':   [],
         }
 
     # =========================================================================
@@ -231,6 +234,17 @@ class PINNTrainer:
         l_smooth = self._compute_axial_smoothness_loss(u_x)
         l_pos    = self._compute_positivity_loss(preds_int)
 
+        # ── Interior pressure supervision (reuse preds_int — no extra forward) ─
+        p_int_exact = self._p_exact(int_pts)
+        l_p_int     = torch.mean((preds_int[:, 3:4] - p_int_exact) ** 2)
+
+        # ── Interior v=w=0 supervision (reuse preds_int — no extra forward) ───
+        # Wall and inlet BCs enforce v=w=0 at boundaries only. Interior v,w
+        # are free under NS (which allows them to be non-zero while maintaining
+        # continuity). Supervising v=w=0 everywhere eliminates transverse flows
+        # that drive ∇·u violations.
+        l_vw_int    = torch.mean(preds_int[:, 1:2] ** 2 + preds_int[:, 2:3] ** 2)
+
         # ── BC — wall, forward #2 ─────────────────────────────────────────────
         l_wall = torch.mean(self.model(bc_pts)[:, 0:3] ** 2)
 
@@ -251,13 +265,15 @@ class PINNTrainer:
         bc_raw = l_wall + l_inlet_vel + l_inlet_p + l_outlet_p
 
         return {
-            'pde_raw':    pde_raw,
-            'bc_raw':     bc_raw,
-            'radial':     l_radial,
-            'smooth':     l_smooth,
-            'positivity': l_pos,
-            'continuity': l_cont,
-            'momentum':   l_mom,
+            'pde_raw':     pde_raw,
+            'bc_raw':      bc_raw,
+            'radial':      l_radial,
+            'smooth':      l_smooth,
+            'positivity':  l_pos,
+            'p_interior':  l_p_int,
+            'vw_interior': l_vw_int,
+            'continuity':  l_cont,
+            'momentum':    l_mom,
         }
 
     def _total_loss(
@@ -277,11 +293,13 @@ class PINNTrainer:
         Wang2021 only adapts lambda_bc (BC vs NS physics balance).
         """
         return (
-            pde_scale          * losses['pde_raw']
-            + lambda_bc_eff    * losses['bc_raw']
-            + WEIGHT_RADIAL    * losses['radial']
-            + WEIGHT_SMOOTH    * losses['smooth']
-            + WEIGHT_POSITIVITY * losses['positivity']
+            pde_scale              * losses['pde_raw']
+            + lambda_bc_eff        * losses['bc_raw']
+            + WEIGHT_RADIAL        * losses['radial']
+            + WEIGHT_SMOOTH        * losses['smooth']
+            + WEIGHT_POSITIVITY    * losses['positivity']
+            + WEIGHT_P_INTERIOR    * losses['p_interior']
+            + WEIGHT_VW_INTERIOR   * losses['vw_interior']
         )
 
     # =========================================================================
@@ -379,6 +397,11 @@ class PINNTrainer:
         # STAGE 0 — WARM-UP (analytical supervision, no PDE/BC)
         # =====================================================================
         logger.info("--- STAGE 0: Analytical Warm-Up (u_exact + p_exact) ---")
+        # Warmup uses a higher LR than physics stage: supervised MSE has no
+        # explosion risk, so we can afford 1e-3. Physics stage resets to
+        # self._init_lr (1e-4) before its own cosine schedule starts.
+        for pg in self.adam_optimizer.param_groups:
+            pg['lr'] = 1e-3
         wu_sched = CosineAnnealingLR(
             self.adam_optimizer, T_max=max(warmup_epochs, 1), eta_min=1e-5
         )
@@ -511,6 +534,8 @@ class PINNTrainer:
                 self.loss_history['radial'].append(losses['radial'].item())
                 self.loss_history['smooth'].append(losses['smooth'].item())
                 self.loss_history['positivity'].append(losses['positivity'].item())
+                self.loss_history['p_interior'].append(losses['p_interior'].item())
+                self.loss_history['vw_interior'].append(losses['vw_interior'].item())
                 self.loss_history['lambda_bc'].append(self.lambda_bc)
                 self.loss_history['continuity'].append(losses['continuity'].item())
                 self.loss_history['momentum'].append(losses['momentum'].item())
@@ -521,9 +546,9 @@ class PINNTrainer:
                         f"tot={total_loss.item():.3e}  "
                         f"pde={losses['pde_raw'].item():.3e}  "
                         f"bc={losses['bc_raw'].item():.3e}  "
+                        f"p_int={losses['p_interior'].item():.3e}  "
+                        f"vw={losses['vw_interior'].item():.3e}  "
                         f"rad={losses['radial'].item():.3e}  "
-                        f"smo={losses['smooth'].item():.3e}  "
-                        f"pos={losses['positivity'].item():.3e}  "
                         f"lbc={self.lambda_bc:.3f}(eff={lbc_eff:.2f})  "
                         f"ramp={pde_scale:.3f}  "
                         f"t={_time.time()-t1:.1f}s"
@@ -554,15 +579,26 @@ class PINNTrainer:
             self.model.parameters(),
             max_iter=lbfgs_epochs,
             history_size=50,
-            tolerance_change=1e-16,
-            tolerance_grad=1e-16,
+            tolerance_change=1e-16,  # extremely tight → runs all max_iter iterations
+            tolerance_grad=1e-16,    # same — lets L-BFGS do full refinement
             line_search_fn='strong_wolfe',
         )
 
-        int_f  = self.geometry.sample_interior(batch_size_int, self.device)
-        bc_f   = self.geometry.sample_walls(batch_size_bc,    self.device)
-        in_f   = self.geometry.sample_inlet(batch_size_bc,    self.device)
-        out_f  = self.geometry.sample_outlet(batch_size_bc,   self.device)
+        # L-BFGS uses LARGER fixed batches than Adam:
+        #   Adam uses small batches (4000) refreshed every 20 steps → stochastic, explores
+        #   L-BFGS uses large fixed batches → deterministic, refines; larger = less overfitting
+        # 10000 interior + 2000 BC: covers the cylindrical domain more uniformly,
+        # prevents the model from overfitting the 4000 Adam points and failing generalisation.
+        lbfgs_int = int(os.environ.get('LBFGS_INT', '10000'))
+        lbfgs_bc  = int(os.environ.get('LBFGS_BC',  '2000'))
+        logger.info(
+            f"  L-BFGS batch: interior={lbfgs_int}  BC={lbfgs_bc}"
+            f"  (Adam used {batch_size_int}/{batch_size_bc})"
+        )
+        int_f  = self.geometry.sample_interior(lbfgs_int, self.device)
+        bc_f   = self.geometry.sample_walls(lbfgs_bc,     self.device)
+        in_f   = self.geometry.sample_inlet(lbfgs_bc,     self.device)
+        out_f  = self.geometry.sample_outlet(lbfgs_bc,    self.device)
 
         t2    = _time.time()
         iters = [0]
@@ -583,7 +619,7 @@ class PINNTrainer:
                     f"tot={los.item():.3e}  "
                     f"pde={ls['pde_raw'].item():.3e}  "
                     f"bc={ls['bc_raw'].item():.3e}  "
-                    f"rad={ls['radial'].item():.3e}  "
+                    f"p_int={ls['p_interior'].item():.3e}  "
                     f"t={_time.time()-t2:.1f}s"
                 )
             return los

@@ -263,7 +263,7 @@ def test_momentum_residual(model, n_pts: int = NX_MOM):
 
     # Need grad for residuals
     pts_g = pts.clone().requires_grad_(True)
-    cont, mx, my, mz, _ = physics.compute_pde_residuals(model, pts_g)
+    cont, mx, my, mz, _, _u_x = physics.compute_pde_residuals(model, pts_g)
 
     cont  = cont.detach().cpu().numpy()
     mx    = mx.detach().cpu().numpy()
