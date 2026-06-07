@@ -1,0 +1,229 @@
+2026-06-07 18:38:37 | SciML_CFD_Engine | INFO     | 
+================================================================================
+2026-06-07 18:38:37 | SciML_CFD_Engine | INFO     | SciML CFD ENGINE - PRODUCTION PIPE FLOW SOLVER
+2026-06-07 18:38:37 | SciML_CFD_Engine | INFO     | ================================================================================
+2026-06-07 18:38:37 | SciML_CFD_Engine | INFO     | Device: CUDA
+2026-06-07 18:38:37 | SciML_CFD_Engine | INFO     | Geometry: Re=100.0, R=0.5, L=3.0
+2026-06-07 18:38:37 | SciML_CFD_Engine | INFO     | Training: Warm-Up=500e | Physics Adam=1500e | L-BFGS=1000i
+2026-06-07 18:38:37 | SciML_CFD_Engine | INFO     | Batching: Interior=4000, BC=800
+2026-06-07 18:38:37 | SciML_CFD_Engine | INFO     | Loss weights: lambda_bc=100.0 | PDE=1x(cont+mom) | radial=1x | pos=10x | smooth=1x
+2026-06-07 18:38:37 | SciML_CFD_Engine | INFO     | Initializing SciML CFD Engine on CUDA
+2026-06-07 18:38:37 | SciML_CFD_Engine | INFO     | Random seed set to 42
+2026-06-07 18:38:37 | SciML_CFD_Engine | INFO     | Geometry: Pipe radius=0.5, length=3.0
+2026-06-07 18:38:37 | SciML_CFD_Engine | INFO     | Physics: Re=100.0, nu=0.0100 | spatial_weight_start=1.0 | driving_force=REMOVED (Double Anchor strategy)
+2026-06-07 18:38:37 | SciML_CFD_Engine | INFO     | Model: PINN3DEngine with 256D embeddings, 6 layers, 429,316 parameters
+2026-06-07 18:38:39 | SciML_CFD_Engine | INFO     | Trainer initialized: lr=1.00e-04, lambda_bc_init=1.000 | PDE*1.0  BC*(lambda_bc*10)  Reg*1.0  Anchor*0.1 | Wang2021 adaptive (floor=1e-6, clamp=[0.1,1000]) | Outlet=Neumann + soft p-anchor at (L/2,0,0)
+2026-06-07 18:38:39 | src.post_processing.visualizer | INFO     | Visualizer model check: hidden_dim=256, num_layers=6
+2026-06-07 18:38:39 | SciML_CFD_Engine | INFO     | Visualizer initialized
+2026-06-07 18:38:39 | SciML_CFD_Engine | INFO     | 
+================================================================================
+2026-06-07 18:38:39 | SciML_CFD_Engine | INFO     | STARTING TWO-STAGE OPTIMIZATION
+2026-06-07 18:38:39 | SciML_CFD_Engine | INFO     | ================================================================================
+2026-06-07 18:38:39 | src.training.trainer | INFO     | ========================================================================
+2026-06-07 18:38:39 | src.training.trainer | INFO     | NAKED PHYSICS PINN — 3D PIPE FLOW
+2026-06-07 18:38:39 | src.training.trainer | INFO     |   Re=100  p_coeff=0.3200  nu=0.0100
+2026-06-07 18:38:39 | src.training.trainer | INFO     |   WarmUp=500  Physics=1500  L-BFGS=1000
+2026-06-07 18:38:39 | src.training.trainer | INFO     |   lr=1e-04  lambda_bc_init=1.00
+2026-06-07 18:38:39 | src.training.trainer | INFO     |   Wang2021: every 50 steps  clamp=[0.1,20.0]
+2026-06-07 18:38:39 | src.training.trainer | INFO     |   PDE ramp: 0.02->1.0 over 100 steps  lambda_bc frozen at 1.0 for first 100 steps
+2026-06-07 18:38:39 | src.training.trainer | INFO     |   BC: wall + inlet_vel + inlet_p + outlet_p(=0)
+2026-06-07 18:38:39 | src.training.trainer | INFO     |   NO radial/positivity/smooth/spatial_weight/double_anchor
+2026-06-07 18:38:39 | src.training.trainer | INFO     | ========================================================================
+2026-06-07 18:38:39 | src.training.trainer | INFO     | --- STAGE 0: Warm-Up ---
+2026-06-07 18:38:39 | src.training.trainer | INFO     | [WarmUp]    1/500  loss=2.345e+00  u_MAE=1.0352  p_MAE=0.6101  t=0.3s
+2026-06-07 18:38:40 | src.training.trainer | INFO     | [WarmUp]   50/500  loss=8.297e-01  u_MAE=0.6524  p_MAE=0.3332  t=0.9s
+2026-06-07 18:38:40 | src.training.trainer | INFO     | [WarmUp]  100/500  loss=3.820e-01  u_MAE=0.4479  p_MAE=0.2292  t=1.5s
+2026-06-07 18:38:41 | src.training.trainer | INFO     | [WarmUp]  150/500  loss=3.277e-01  u_MAE=0.4122  p_MAE=0.2172  t=2.2s
+2026-06-07 18:38:41 | src.training.trainer | INFO     | [WarmUp]  200/500  loss=2.826e-01  u_MAE=0.3759  p_MAE=0.2049  t=2.8s
+2026-06-07 18:38:42 | src.training.trainer | INFO     | [WarmUp]  250/500  loss=2.741e-01  u_MAE=0.3685  p_MAE=0.2033  t=3.4s
+2026-06-07 18:38:43 | src.training.trainer | INFO     | [WarmUp]  300/500  loss=2.571e-01  u_MAE=0.3552  p_MAE=0.1992  t=4.0s
+2026-06-07 18:38:43 | src.training.trainer | INFO     | [WarmUp]  350/500  loss=2.400e-01  u_MAE=0.3411  p_MAE=0.1892  t=4.6s
+2026-06-07 18:38:44 | src.training.trainer | INFO     | [WarmUp]  400/500  loss=2.413e-01  u_MAE=0.3371  p_MAE=0.1970  t=5.3s
+2026-06-07 18:38:45 | src.training.trainer | INFO     | [WarmUp]  450/500  loss=2.308e-01  u_MAE=0.3312  p_MAE=0.1898  t=6.2s
+2026-06-07 18:38:46 | src.training.trainer | INFO     | [WarmUp]  500/500  loss=2.215e-01  u_MAE=0.3191  p_MAE=0.1922  t=7.0s
+2026-06-07 18:38:46 | src.training.trainer | INFO     | WARM-UP COMPLETE  7.0s
+2026-06-07 18:38:46 | src.training.trainer | INFO     | 
+2026-06-07 18:38:46 | src.training.trainer | INFO     | --- STAGE 1: Physics Adam ---
+2026-06-07 18:38:46 | src.training.trainer | INFO     | [CHECK] BC weight at step 0: lambda_bc_eff=1.0 x 1 = 1.0
+2026-06-07 18:38:46 | src.training.trainer | INFO     | [Physics]    1/1500  tot=3.846e+02  pde=1.287e+04  bc=1.110e+00  lbc=1.000(eff=1.00)  ramp=0.030  lr=1.00e-04  t=0.3s
+2026-06-07 18:38:48 | src.training.trainer | INFO     | [TIMER] step=10  avg_dt=255ms/step
+2026-06-07 18:38:51 | src.training.trainer | INFO     | [TIMER] step=20  avg_dt=253ms/step
+2026-06-07 18:38:54 | src.training.trainer | INFO     | [TIMER] step=30  avg_dt=271ms/step
+2026-06-07 18:38:56 | src.training.trainer | INFO     | [TIMER] step=40  avg_dt=294ms/step
+2026-06-07 18:39:00 | src.training.trainer | INFO     | [TIMER] step=50  avg_dt=332ms/step
+2026-06-07 18:39:00 | src.training.trainer | INFO     | [Physics]   50/1500  tot=6.087e+04  pde=1.194e+05  bc=3.003e+00  lbc=20.000(eff=1.00)  ramp=0.510  lr=9.97e-05  t=14.2s
+2026-06-07 18:39:03 | src.training.trainer | INFO     | [TIMER] step=60  avg_dt=327ms/step
+2026-06-07 18:39:06 | src.training.trainer | INFO     | [TIMER] step=70  avg_dt=329ms/step
+2026-06-07 18:39:10 | src.training.trainer | INFO     | [TIMER] step=80  avg_dt=330ms/step
+2026-06-07 18:39:13 | src.training.trainer | INFO     | [TIMER] step=90  avg_dt=320ms/step
+2026-06-07 18:39:16 | src.training.trainer | INFO     | [TIMER] step=100  avg_dt=329ms/step
+2026-06-07 18:39:16 | src.training.trainer | INFO     | [Physics]  100/1500  tot=5.132e+05  pde=5.132e+05  bc=1.071e+01  lbc=20.000(eff=1.00)  ramp=1.000  lr=9.89e-05  t=30.6s
+2026-06-07 18:39:19 | src.training.trainer | INFO     | [TIMER] step=110  avg_dt=329ms/step
+2026-06-07 18:39:23 | src.training.trainer | INFO     | [TIMER] step=120  avg_dt=330ms/step
+2026-06-07 18:39:26 | src.training.trainer | INFO     | [TIMER] step=130  avg_dt=327ms/step
+2026-06-07 18:39:29 | src.training.trainer | INFO     | [TIMER] step=140  avg_dt=326ms/step
+2026-06-07 18:39:33 | src.training.trainer | INFO     | [TIMER] step=150  avg_dt=331ms/step
+2026-06-07 18:39:33 | src.training.trainer | INFO     | [Physics]  150/1500  tot=2.362e+05  pde=2.361e+05  bc=5.634e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=9.76e-05  t=47.0s
+2026-06-07 18:39:36 | src.training.trainer | INFO     | [TIMER] step=160  avg_dt=327ms/step
+2026-06-07 18:39:39 | src.training.trainer | INFO     | [TIMER] step=170  avg_dt=329ms/step
+2026-06-07 18:39:42 | src.training.trainer | INFO     | [TIMER] step=180  avg_dt=325ms/step
+2026-06-07 18:39:46 | src.training.trainer | INFO     | [TIMER] step=190  avg_dt=321ms/step
+2026-06-07 18:39:49 | src.training.trainer | INFO     | [TIMER] step=200  avg_dt=328ms/step
+2026-06-07 18:39:49 | src.training.trainer | INFO     | [Physics]  200/1500  tot=2.275e+05  pde=2.274e+05  bc=6.842e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=9.57e-05  t=63.3s
+2026-06-07 18:39:49 | src.training.trainer | INFO     |   Checkpoint: checkpoints/physics_adam_200.pth
+2026-06-07 18:39:52 | src.training.trainer | INFO     | [TIMER] step=210  avg_dt=330ms/step
+2026-06-07 18:39:56 | src.training.trainer | INFO     | [TIMER] step=220  avg_dt=329ms/step
+2026-06-07 18:39:59 | src.training.trainer | INFO     | [TIMER] step=230  avg_dt=329ms/step
+2026-06-07 18:40:02 | src.training.trainer | INFO     | [TIMER] step=240  avg_dt=327ms/step
+2026-06-07 18:40:05 | src.training.trainer | INFO     | [TIMER] step=250  avg_dt=328ms/step
+2026-06-07 18:40:05 | src.training.trainer | INFO     | [Physics]  250/1500  tot=1.959e+05  pde=1.957e+05  bc=5.651e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=9.34e-05  t=79.8s
+2026-06-07 18:40:09 | src.training.trainer | INFO     | [TIMER] step=260  avg_dt=326ms/step
+2026-06-07 18:40:12 | src.training.trainer | INFO     | [TIMER] step=270  avg_dt=322ms/step
+2026-06-07 18:40:15 | src.training.trainer | INFO     | [TIMER] step=280  avg_dt=329ms/step
+2026-06-07 18:40:18 | src.training.trainer | INFO     | [TIMER] step=290  avg_dt=326ms/step
+2026-06-07 18:40:22 | src.training.trainer | INFO     | [TIMER] step=300  avg_dt=328ms/step
+2026-06-07 18:40:22 | src.training.trainer | INFO     | [Physics]  300/1500  tot=1.718e+05  pde=1.717e+05  bc=4.740e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=9.05e-05  t=96.2s
+2026-06-07 18:40:25 | src.training.trainer | INFO     | [TIMER] step=310  avg_dt=326ms/step
+2026-06-07 18:40:28 | src.training.trainer | INFO     | [TIMER] step=320  avg_dt=328ms/step
+2026-06-07 18:40:32 | src.training.trainer | INFO     | [TIMER] step=330  avg_dt=333ms/step
+2026-06-07 18:40:35 | src.training.trainer | INFO     | [TIMER] step=340  avg_dt=326ms/step
+2026-06-07 18:40:38 | src.training.trainer | INFO     | [TIMER] step=350  avg_dt=328ms/step
+2026-06-07 18:40:38 | src.training.trainer | INFO     | [Physics]  350/1500  tot=1.885e+05  pde=1.884e+05  bc=5.866e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=8.73e-05  t=112.6s
+2026-06-07 18:40:42 | src.training.trainer | INFO     | [TIMER] step=360  avg_dt=329ms/step
+2026-06-07 18:40:45 | src.training.trainer | INFO     | [TIMER] step=370  avg_dt=329ms/step
+2026-06-07 18:40:48 | src.training.trainer | INFO     | [TIMER] step=380  avg_dt=331ms/step
+2026-06-07 18:40:51 | src.training.trainer | INFO     | [TIMER] step=390  avg_dt=329ms/step
+2026-06-07 18:40:55 | src.training.trainer | INFO     | [TIMER] step=400  avg_dt=329ms/step
+2026-06-07 18:40:55 | src.training.trainer | INFO     | [Physics]  400/1500  tot=1.621e+05  pde=1.619e+05  bc=5.297e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=8.36e-05  t=129.1s
+2026-06-07 18:40:55 | src.training.trainer | INFO     |   Checkpoint: checkpoints/physics_adam_400.pth
+2026-06-07 18:40:58 | src.training.trainer | INFO     | [TIMER] step=410  avg_dt=325ms/step
+2026-06-07 18:41:01 | src.training.trainer | INFO     | [TIMER] step=420  avg_dt=329ms/step
+2026-06-07 18:41:05 | src.training.trainer | INFO     | [TIMER] step=430  avg_dt=327ms/step
+2026-06-07 18:41:08 | src.training.trainer | INFO     | [TIMER] step=440  avg_dt=330ms/step
+2026-06-07 18:41:11 | src.training.trainer | INFO     | [TIMER] step=450  avg_dt=330ms/step
+2026-06-07 18:41:11 | src.training.trainer | INFO     | [Physics]  450/1500  tot=1.017e+05  pde=1.016e+05  bc=3.978e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=7.96e-05  t=145.6s
+2026-06-07 18:41:14 | src.training.trainer | INFO     | [TIMER] step=460  avg_dt=330ms/step
+2026-06-07 18:41:18 | src.training.trainer | INFO     | [TIMER] step=470  avg_dt=330ms/step
+2026-06-07 18:41:21 | src.training.trainer | INFO     | [TIMER] step=480  avg_dt=331ms/step
+2026-06-07 18:41:24 | src.training.trainer | INFO     | [TIMER] step=490  avg_dt=320ms/step
+2026-06-07 18:41:27 | src.training.trainer | INFO     | [TIMER] step=500  avg_dt=277ms/step
+2026-06-07 18:41:27 | src.training.trainer | INFO     | [Physics]  500/1500  tot=1.005e+05  pde=1.004e+05  bc=3.912e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=7.52e-05  t=161.4s
+2026-06-07 18:41:30 | src.training.trainer | INFO     | [TIMER] step=510  avg_dt=281ms/step
+2026-06-07 18:41:33 | src.training.trainer | INFO     | [TIMER] step=520  avg_dt=291ms/step
+2026-06-07 18:41:35 | src.training.trainer | INFO     | [TIMER] step=530  avg_dt=267ms/step
+2026-06-07 18:41:38 | src.training.trainer | INFO     | [TIMER] step=540  avg_dt=294ms/step
+2026-06-07 18:41:41 | src.training.trainer | INFO     | [TIMER] step=550  avg_dt=293ms/step
+2026-06-07 18:41:41 | src.training.trainer | INFO     | [Physics]  550/1500  tot=1.239e+05  pde=1.238e+05  bc=3.996e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=7.06e-05  t=175.7s
+2026-06-07 18:41:45 | src.training.trainer | INFO     | [TIMER] step=560  avg_dt=324ms/step
+2026-06-07 18:41:48 | src.training.trainer | INFO     | [TIMER] step=570  avg_dt=300ms/step
+2026-06-07 18:41:50 | src.training.trainer | INFO     | [TIMER] step=580  avg_dt=262ms/step
+2026-06-07 18:41:53 | src.training.trainer | INFO     | [TIMER] step=590  avg_dt=256ms/step
+2026-06-07 18:41:55 | src.training.trainer | INFO     | [TIMER] step=600  avg_dt=262ms/step
+2026-06-07 18:41:55 | src.training.trainer | INFO     | [Physics]  600/1500  tot=1.974e+05  pde=1.973e+05  bc=4.860e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=6.58e-05  t=189.7s
+2026-06-07 18:41:55 | src.training.trainer | INFO     |   Checkpoint: checkpoints/physics_adam_600.pth
+2026-06-07 18:41:58 | src.training.trainer | INFO     | [TIMER] step=610  avg_dt=267ms/step
+2026-06-07 18:42:01 | src.training.trainer | INFO     | [TIMER] step=620  avg_dt=264ms/step
+2026-06-07 18:42:03 | src.training.trainer | INFO     | [TIMER] step=630  avg_dt=261ms/step
+2026-06-07 18:42:06 | src.training.trainer | INFO     | [TIMER] step=640  avg_dt=257ms/step
+2026-06-07 18:42:08 | src.training.trainer | INFO     | [TIMER] step=650  avg_dt=248ms/step
+2026-06-07 18:42:08 | src.training.trainer | INFO     | [Physics]  650/1500  tot=2.047e+05  pde=2.046e+05  bc=4.810e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=6.08e-05  t=202.7s
+2026-06-07 18:42:11 | src.training.trainer | INFO     | [TIMER] step=660  avg_dt=242ms/step
+2026-06-07 18:42:13 | src.training.trainer | INFO     | [TIMER] step=670  avg_dt=242ms/step
+2026-06-07 18:42:16 | src.training.trainer | INFO     | [TIMER] step=680  avg_dt=243ms/step
+2026-06-07 18:42:18 | src.training.trainer | INFO     | [TIMER] step=690  avg_dt=242ms/step
+2026-06-07 18:42:20 | src.training.trainer | INFO     | [TIMER] step=700  avg_dt=243ms/step
+2026-06-07 18:42:20 | src.training.trainer | INFO     | [Physics]  700/1500  tot=1.624e+05  pde=1.624e+05  bc=4.246e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=5.57e-05  t=214.8s
+2026-06-07 18:42:23 | src.training.trainer | INFO     | [TIMER] step=710  avg_dt=242ms/step
+2026-06-07 18:42:25 | src.training.trainer | INFO     | [TIMER] step=720  avg_dt=241ms/step
+2026-06-07 18:42:28 | src.training.trainer | INFO     | [TIMER] step=730  avg_dt=237ms/step
+2026-06-07 18:42:30 | src.training.trainer | INFO     | [TIMER] step=740  avg_dt=242ms/step
+2026-06-07 18:42:33 | src.training.trainer | INFO     | [TIMER] step=750  avg_dt=237ms/step
+2026-06-07 18:42:33 | src.training.trainer | INFO     | [Physics]  750/1500  tot=1.332e+05  pde=1.331e+05  bc=3.491e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=5.05e-05  t=226.9s
+2026-06-07 18:42:35 | src.training.trainer | INFO     | [TIMER] step=760  avg_dt=242ms/step
+2026-06-07 18:42:37 | src.training.trainer | INFO     | [TIMER] step=770  avg_dt=242ms/step
+2026-06-07 18:42:40 | src.training.trainer | INFO     | [TIMER] step=780  avg_dt=242ms/step
+2026-06-07 18:42:42 | src.training.trainer | INFO     | [TIMER] step=790  avg_dt=241ms/step
+2026-06-07 18:42:45 | src.training.trainer | INFO     | [TIMER] step=800  avg_dt=242ms/step
+2026-06-07 18:42:45 | src.training.trainer | INFO     | [Physics]  800/1500  tot=8.907e+04  pde=8.902e+04  bc=2.337e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=4.53e-05  t=239.0s
+2026-06-07 18:42:45 | src.training.trainer | INFO     |   Checkpoint: checkpoints/physics_adam_800.pth
+2026-06-07 18:42:47 | src.training.trainer | INFO     | [TIMER] step=810  avg_dt=242ms/step
+2026-06-07 18:42:49 | src.training.trainer | INFO     | [TIMER] step=820  avg_dt=242ms/step
+2026-06-07 18:42:52 | src.training.trainer | INFO     | [TIMER] step=830  avg_dt=242ms/step
+2026-06-07 18:42:54 | src.training.trainer | INFO     | [TIMER] step=840  avg_dt=242ms/step
+2026-06-07 18:42:57 | src.training.trainer | INFO     | [TIMER] step=850  avg_dt=242ms/step
+2026-06-07 18:42:57 | src.training.trainer | INFO     | [Physics]  850/1500  tot=6.470e+04  pde=6.466e+04  bc=2.253e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=4.02e-05  t=251.1s
+2026-06-07 18:42:59 | src.training.trainer | INFO     | [TIMER] step=860  avg_dt=241ms/step
+2026-06-07 18:43:02 | src.training.trainer | INFO     | [TIMER] step=870  avg_dt=243ms/step
+2026-06-07 18:43:04 | src.training.trainer | INFO     | [TIMER] step=880  avg_dt=242ms/step
+2026-06-07 18:43:06 | src.training.trainer | INFO     | [TIMER] step=890  avg_dt=243ms/step
+2026-06-07 18:43:09 | src.training.trainer | INFO     | [TIMER] step=900  avg_dt=241ms/step
+2026-06-07 18:43:09 | src.training.trainer | INFO     | [Physics]  900/1500  tot=4.910e+04  pde=4.907e+04  bc=1.771e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=3.52e-05  t=263.2s
+2026-06-07 18:43:11 | src.training.trainer | INFO     | [TIMER] step=910  avg_dt=243ms/step
+2026-06-07 18:43:14 | src.training.trainer | INFO     | [TIMER] step=920  avg_dt=241ms/step
+2026-06-07 18:43:16 | src.training.trainer | INFO     | [TIMER] step=930  avg_dt=243ms/step
+2026-06-07 18:43:19 | src.training.trainer | INFO     | [TIMER] step=940  avg_dt=243ms/step
+2026-06-07 18:43:21 | src.training.trainer | INFO     | [TIMER] step=950  avg_dt=241ms/step
+2026-06-07 18:43:21 | src.training.trainer | INFO     | [Physics]  950/1500  tot=4.263e+04  pde=4.259e+04  bc=1.778e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=3.04e-05  t=275.3s
+2026-06-07 18:43:23 | src.training.trainer | INFO     | [TIMER] step=960  avg_dt=243ms/step
+2026-06-07 18:43:26 | src.training.trainer | INFO     | [TIMER] step=970  avg_dt=237ms/step
+2026-06-07 18:43:28 | src.training.trainer | INFO     | [TIMER] step=980  avg_dt=242ms/step
+2026-06-07 18:43:31 | src.training.trainer | INFO     | [TIMER] step=990  avg_dt=237ms/step
+2026-06-07 18:43:33 | src.training.trainer | INFO     | [TIMER] step=1000  avg_dt=242ms/step
+2026-06-07 18:43:33 | src.training.trainer | INFO     | [Physics] 1000/1500  tot=3.351e+04  pde=3.347e+04  bc=1.888e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=2.57e-05  t=287.4s
+2026-06-07 18:43:33 | src.training.trainer | INFO     |   Checkpoint: checkpoints/physics_adam_1000.pth
+2026-06-07 18:43:36 | src.training.trainer | INFO     | [TIMER] step=1010  avg_dt=256ms/step
+2026-06-07 18:43:38 | src.training.trainer | INFO     | [TIMER] step=1020  avg_dt=246ms/step
+2026-06-07 18:43:41 | src.training.trainer | INFO     | [TIMER] step=1030  avg_dt=243ms/step
+2026-06-07 18:43:43 | src.training.trainer | INFO     | [TIMER] step=1040  avg_dt=249ms/step
+2026-06-07 18:43:45 | src.training.trainer | INFO     | [TIMER] step=1050  avg_dt=248ms/step
+2026-06-07 18:43:46 | src.training.trainer | INFO     | [Physics] 1050/1500  tot=1.793e+04  pde=1.790e+04  bc=1.545e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=2.14e-05  t=299.9s
+2026-06-07 18:43:48 | src.training.trainer | INFO     | [TIMER] step=1060  avg_dt=249ms/step
+2026-06-07 18:43:50 | src.training.trainer | INFO     | [TIMER] step=1070  avg_dt=245ms/step
+2026-06-07 18:43:53 | src.training.trainer | INFO     | [TIMER] step=1080  avg_dt=248ms/step
+2026-06-07 18:43:55 | src.training.trainer | INFO     | [TIMER] step=1090  avg_dt=243ms/step
+2026-06-07 18:43:58 | src.training.trainer | INFO     | [TIMER] step=1100  avg_dt=259ms/step
+2026-06-07 18:43:58 | src.training.trainer | INFO     | [Physics] 1100/1500  tot=1.127e+04  pde=1.124e+04  bc=1.461e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=1.74e-05  t=312.3s
+2026-06-07 18:44:01 | src.training.trainer | INFO     | [TIMER] step=1110  avg_dt=266ms/step
+2026-06-07 18:44:03 | src.training.trainer | INFO     | [TIMER] step=1120  avg_dt=247ms/step
+2026-06-07 18:44:06 | src.training.trainer | INFO     | [TIMER] step=1130  avg_dt=267ms/step
+2026-06-07 18:44:08 | src.training.trainer | INFO     | [TIMER] step=1140  avg_dt=252ms/step
+2026-06-07 18:44:11 | src.training.trainer | INFO     | [TIMER] step=1150  avg_dt=249ms/step
+2026-06-07 18:44:11 | src.training.trainer | INFO     | [Physics] 1150/1500  tot=7.680e+03  pde=7.651e+03  bc=1.420e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=1.37e-05  t=325.1s
+2026-06-07 18:44:13 | src.training.trainer | INFO     | [TIMER] step=1160  avg_dt=252ms/step
+2026-06-07 18:44:16 | src.training.trainer | INFO     | [TIMER] step=1170  avg_dt=247ms/step
+2026-06-07 18:44:18 | src.training.trainer | INFO     | [TIMER] step=1180  avg_dt=263ms/step
+2026-06-07 18:44:21 | src.training.trainer | INFO     | [TIMER] step=1190  avg_dt=268ms/step
+2026-06-07 18:44:24 | src.training.trainer | INFO     | [TIMER] step=1200  avg_dt=263ms/step
+2026-06-07 18:44:24 | src.training.trainer | INFO     | [Physics] 1200/1500  tot=4.638e+03  pde=4.610e+03  bc=1.396e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=1.05e-05  t=338.1s
+2026-06-07 18:44:24 | src.training.trainer | INFO     |   Checkpoint: checkpoints/physics_adam_1200.pth
+2026-06-07 18:44:26 | src.training.trainer | INFO     | [TIMER] step=1210  avg_dt=267ms/step
+2026-06-07 18:44:29 | src.training.trainer | INFO     | [TIMER] step=1220  avg_dt=258ms/step
+2026-06-07 18:44:32 | src.training.trainer | INFO     | [TIMER] step=1230  avg_dt=266ms/step
+2026-06-07 18:44:34 | src.training.trainer | INFO     | [TIMER] step=1240  avg_dt=256ms/step
+2026-06-07 18:44:37 | src.training.trainer | INFO     | [TIMER] step=1250  avg_dt=267ms/step
+2026-06-07 18:44:37 | src.training.trainer | INFO     | [Physics] 1250/1500  tot=3.244e+03  pde=3.216e+03  bc=1.373e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=7.63e-06  t=351.3s
+2026-06-07 18:44:40 | src.training.trainer | INFO     | [TIMER] step=1260  avg_dt=263ms/step
+2026-06-07 18:44:42 | src.training.trainer | INFO     | [TIMER] step=1270  avg_dt=257ms/step
+2026-06-07 18:44:45 | src.training.trainer | INFO     | [TIMER] step=1280  avg_dt=292ms/step
+2026-06-07 18:44:48 | src.training.trainer | INFO     | [TIMER] step=1290  avg_dt=254ms/step
+2026-06-07 18:44:50 | src.training.trainer | INFO     | [TIMER] step=1300  avg_dt=260ms/step
+2026-06-07 18:44:50 | src.training.trainer | INFO     | [Physics] 1300/1500  tot=2.723e+03  pde=2.696e+03  bc=1.346e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=5.28e-06  t=364.6s
+2026-06-07 18:44:53 | src.training.trainer | INFO     | [TIMER] step=1310  avg_dt=294ms/step
+2026-06-07 18:44:56 | src.training.trainer | INFO     | [TIMER] step=1320  avg_dt=264ms/step
+2026-06-07 18:44:58 | src.training.trainer | INFO     | [TIMER] step=1330  avg_dt=255ms/step
+2026-06-07 18:45:01 | src.training.trainer | INFO     | [TIMER] step=1340  avg_dt=260ms/step
+2026-06-07 18:45:04 | src.training.trainer | INFO     | [TIMER] step=1350  avg_dt=255ms/step
+2026-06-07 18:45:04 | src.training.trainer | INFO     | [Physics] 1350/1500  tot=2.673e+03  pde=2.647e+03  bc=1.307e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=3.42e-06  t=377.9s
+2026-06-07 18:45:06 | src.training.trainer | INFO     | [TIMER] step=1360  avg_dt=270ms/step
+2026-06-07 18:45:09 | src.training.trainer | INFO     | [TIMER] step=1370  avg_dt=257ms/step
+2026-06-07 18:45:11 | src.training.trainer | INFO     | [TIMER] step=1380  avg_dt=258ms/step
+2026-06-07 18:45:14 | src.training.trainer | INFO     | [TIMER] step=1390  avg_dt=256ms/step
+2026-06-07 18:45:17 | src.training.trainer | INFO     | [TIMER] step=1400  avg_dt=276ms/step
+2026-06-07 18:45:17 | src.training.trainer | INFO     | [Physics] 1400/1500  tot=2.498e+03  pde=2.472e+03  bc=1.303e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=2.08e-06  t=391.1s
+2026-06-07 18:45:17 | src.training.trainer | INFO     |   Checkpoint: checkpoints/physics_adam_1400.pth
+2026-06-07 18:45:19 | src.training.trainer | INFO     | [TIMER] step=1410  avg_dt=250ms/step
+2026-06-07 18:45:22 | src.training.trainer | INFO     | [TIMER] step=1420  avg_dt=247ms/step
+2026-06-07 18:45:24 | src.training.trainer | INFO     | [TIMER] step=1430  avg_dt=245ms/step
+2026-06-07 18:45:27 | src.training.trainer | INFO     | [TIMER] step=1440  avg_dt=247ms/step
+2026-06-07 18:45:29 | src.training.trainer | INFO     | [TIMER] step=1450  avg_dt=253ms/step
+2026-06-07 18:45:29 | src.training.trainer | INFO     | [Physics] 1450/1500  tot=2.509e+03  pde=2.482e+03  bc=1.339e+00  lbc=20.000(eff=20.00)  ramp=1.000  lr=1.27e-06  t=403.6s

@@ -74,27 +74,14 @@ def build_simulation_components(
     outlet_suction_strength = float(os.environ.get('OUTLET_SUCTION_STRENGTH', '5.0'))
     outlet_suction_width    = float(os.environ.get('OUTLET_SUCTION_WIDTH',    '0.05'))
 
-    # Hagen-Poiseuille analitik itme kuvveti: f = 8*nu/R^2
-    # Re=100, R=0.5 → f = 8/(100*0.25) = 0.32  |  Re=50, R=0.5 → f = 0.64
-    # Bu deger warm-up'ta ogretilen p_exact = f*(L-x) ile tutarlidir.
-    nu_val        = 1.0 / float(reynolds_number)
-    driving_force = float(os.environ.get(
-        'DRIVING_FORCE',
-        str(8.0 * nu_val / (float(radius) ** 2))
-    ))
-
+    nu_val  = 1.0 / float(reynolds_number)
     physics = NavierStokes3DPhysics(
         Re=float(reynolds_number),
-        spatial_weight_start=spatial_weight_start,
-        spatial_weight_slope=spatial_weight_slope,
         pipe_length=float(length),
-        outlet_suction_strength=outlet_suction_strength,
-        outlet_suction_width=outlet_suction_width,
-        driving_force=driving_force,
     )
     logger.info(
-        f"Physics: Re={reynolds_number}, nu={nu_val:.4f}, "
-        f"driving_force={driving_force:.4f} | spatial_weight_start={spatial_weight_start}"
+        f"Physics: Re={reynolds_number}  nu={nu_val:.4f}  "
+        f"L={length}  R={radius}  p_coeff={8.0*nu_val/radius**2:.4f}"
     )
     
     # ========================================================================
@@ -116,8 +103,8 @@ def build_simulation_components(
     # ========================================================================
     # TRAINER WITH PRODUCTION WEIGHTS (Golden Ratio Tuning for Poiseuille)
     # ========================================================================
-    lr        = float(os.environ.get('LR', '1e-3'))
-    lambda_bc = float(os.environ.get('LAMBDA_BC', '100.0'))  # Pre-training sonrası sakin BC
+    lr        = float(os.environ.get('LR', '1e-4'))   # lowered: 1e-3 caused explosion
+    lambda_bc = float(os.environ.get('LAMBDA_BC', '1.0'))
 
     trainer = PINNTrainer(
         model=model,
@@ -128,8 +115,9 @@ def build_simulation_components(
         lambda_bc=lambda_bc,
     )
     logger.info(
-        f"Trainer initialized: lr={lr:.2e}, lambda_bc={lambda_bc:.1f} | "
-        f"Physics weights: PDE=1x, radial=1x, pos=10x, smooth=1x"
+        f"Trainer: lr={lr:.2e}  lambda_bc_init={lambda_bc:.2f}  "
+        f"Scaffolding: radial*100 smooth*20 pos*500  "
+        f"Wang2021/5steps(NS-only)  outlet=p=0"
     )
     
     # ========================================================================
@@ -272,10 +260,12 @@ def main():
         ADAM_EPOCHS=2000      Total Adam epochs (warmup + physics)
         LBFGS_EPOCHS=1000     L-BFGS max iterations
 
-    LOSS WEIGHTS (Hardcoded — Pre-training sonrasi sakin degerler):
-        PDE = l_cont + l_mom  (1x — warm-up sayesinde yeterli)
-        radial=1.0  pos=10.0  smooth=1.0
-        LAMBDA_BC=100.0       Wall BC (pre-training ile zaten ogrenildi)
+    LOSS WEIGHTS (Stabilised Wang et al. 2021):
+        PDE  = 1.0  * (l_cont + l_mom/3)       (momentum normalised /3)
+        BC   = lambda_bc * 10.0 * (wall+in+out) (adaptive, clamp [0.1,1000])
+        Reg  = 1.0 * radial + 1.0 * pos + 1.0 * smooth
+        Anch = 0.1 * p_anchor (soft interior pressure at L/2)
+        LAMBDA_BC=1.0 (initial) — Wang2021 adapts, denom >= 1e-6
     
     PHYSICS:
         SPATIAL_WEIGHT_START=1.0      Initial spatial weighting
@@ -343,9 +333,9 @@ def main():
     # ========================================================================
     # EXECUTE TRAINING
     # ========================================================================
-    logger.info("\n" + "█" * 80)
+    logger.info("\n" + "=" * 80)
     logger.info("STARTING TWO-STAGE OPTIMIZATION")
-    logger.info("█" * 80)
+    logger.info("=" * 80)
     
     history = trainer.train(
         adam_epochs=adam_epochs,
@@ -364,7 +354,7 @@ def main():
     
     model_path = f"checkpoints/pipe_flow_model{suffix}.pth"
     torch.save(model.state_dict(), model_path)
-    logger.info(f"\n✓ Model saved to: {model_path}")
+    logger.info(f"\n[OK] Model saved to: {model_path}")
     
     try:
         image_path = f"output/pipe_flow_visualization{suffix}.png"
@@ -374,7 +364,7 @@ def main():
             radius=radius,
             save_path=image_path
         )
-        logger.info(f"✓ Visualization saved to: {image_path}")
+        logger.info(f"[OK] Visualization saved to: {image_path}")
     except Exception as e:
         logger.warning(f"Visualization generation failed: {e}")
     
