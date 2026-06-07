@@ -59,16 +59,23 @@ class NavierStokes3DPhysics:
         self,
         model: nn.Module,
         coords: torch.Tensor,
+        second_order_graph: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
                torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns: (continuity, mom_x, mom_y, mom_z, preds, u_x)
 
+        second_order_graph:
+          False (Adam stage) — 2nd derivatives use create_graph=False.
+            Fast (~3-4×) but the Laplacian's gradient w.r.t. θ is NOT
+            backpropagated, so momentum residual cannot be fully minimised
+            through the viscous term.
+          True  (L-BFGS stage) — 2nd derivatives use create_graph=True.
+            Slower, but the full momentum equation (including ν∇²u) is
+            differentiable, letting L-BFGS drive momentum residual to ~0.
+
         u_x (= du/dx) is returned as 6th element so the trainer can compute
-        the axial smoothness loss mean(u_x²) for free, reusing this tensor
-        instead of doing another forward pass.  u_x was computed with
-        create_graph=True, so mean(u_x²) stays on the autograd graph and
-        total_loss.backward() correctly backpropagates through it.
+        the axial smoothness loss mean(u_x²) for free.
         """
         if not coords.requires_grad:
             coords = coords.detach().clone().requires_grad_(True)
@@ -89,18 +96,21 @@ class NavierStokes3DPhysics:
         gp = self._grad(p, coords)
         p_x, p_y, p_z = gp[:, 0:1], gp[:, 1:2], gp[:, 2:3]
 
-        # ── second-order (create_graph=False — speed optimisation) ───────────
-        u_xx = self._grad(u_x, coords, create_graph=False)[:, 0:1]
-        u_yy = self._grad(u_y, coords, create_graph=False)[:, 1:2]
-        u_zz = self._grad(u_z, coords, create_graph=False)[:, 2:3]
+        # ── second-order ─────────────────────────────────────────────────────
+        # create_graph controlled by second_order_graph:
+        #   Adam → False (fast)   |   L-BFGS → True (full momentum optimisation)
+        cg2 = second_order_graph
+        u_xx = self._grad(u_x, coords, create_graph=cg2)[:, 0:1]
+        u_yy = self._grad(u_y, coords, create_graph=cg2)[:, 1:2]
+        u_zz = self._grad(u_z, coords, create_graph=cg2)[:, 2:3]
 
-        v_xx = self._grad(v_x, coords, create_graph=False)[:, 0:1]
-        v_yy = self._grad(v_y, coords, create_graph=False)[:, 1:2]
-        v_zz = self._grad(v_z, coords, create_graph=False)[:, 2:3]
+        v_xx = self._grad(v_x, coords, create_graph=cg2)[:, 0:1]
+        v_yy = self._grad(v_y, coords, create_graph=cg2)[:, 1:2]
+        v_zz = self._grad(v_z, coords, create_graph=cg2)[:, 2:3]
 
-        w_xx = self._grad(w_x, coords, create_graph=False)[:, 0:1]
-        w_yy = self._grad(w_y, coords, create_graph=False)[:, 1:2]
-        w_zz = self._grad(w_z, coords, create_graph=False)[:, 2:3]
+        w_xx = self._grad(w_x, coords, create_graph=cg2)[:, 0:1]
+        w_yy = self._grad(w_y, coords, create_graph=cg2)[:, 1:2]
+        w_zz = self._grad(w_z, coords, create_graph=cg2)[:, 2:3]
 
         laplacian_u = u_xx + u_yy + u_zz
         laplacian_v = v_xx + v_yy + v_zz

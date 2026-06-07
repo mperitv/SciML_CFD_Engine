@@ -87,11 +87,22 @@ from typing import Dict, Optional
 logger = logging.getLogger(__name__)
 
 # ── Loss weights ──────────────────────────────────────────────────────────────
-WEIGHT_RADIAL:      float = 100.0  # u shape guide — keep HIGH (reducing to 30 killed propagation)
+PDE_SCALE_BASE:     float = 5.0    # NS physics base multiplier (was 1.0)
+                                    # Increases NS gradient signal 5× relative to scaffolding.
+                                    # With correct shape (parabolicity=0.999) already learned,
+                                    # stronger PDE drives divergence and momentum to near-zero.
+WEIGHT_RADIAL:      float = 100.0  # u shape guide
 WEIGHT_SMOOTH:      float = 20.0   # axial smoothness: mean(|du/dx|²)
 WEIGHT_POSITIVITY:  float = 500.0  # no backflow
-WEIGHT_P_INTERIOR:  float = 50.0   # interior pressure supervision: p=(8ν/R²)*(L-x)
-WEIGHT_VW_INTERIOR: float = 50.0   # interior v=w=0 supervision (transverse flow prevention)
+WEIGHT_P_INTERIOR:  float = 50.0   # interior pressure VALUES: p=(8ν/R²)*(L-x)
+WEIGHT_VW_INTERIOR: float = 50.0   # interior v=w=0
+WEIGHT_P_GRAD:      float = 30.0   # interior pressure GRADIENT supervision
+                                    # ← THE KEY FIX for momentum/continuity fail
+                                    # Model learned correct p VALUES but high-frequency
+                                    # oscillations make dp/dx ≠ -0.32 locally.
+                                    # This forces: dp/dx → -p_coeff, dp/dy → 0, dp/dz → 0
+                                    # Once dp/dx=-0.32 everywhere: momentum_x = p_x - ν∇²u
+                                    # = -0.32 - (-0.32) = 0  → NS satisfied exactly.
 
 # ── Wang2021 config ───────────────────────────────────────────────────────────
 LAMBDA_BC_INIT:   float = 1.0
@@ -139,8 +150,8 @@ class PINNTrainer:
             'warmup':      [],
             'total':       [], 'pde':        [], 'bc':          [],
             'radial':      [], 'smooth':     [], 'positivity':  [],
-            'p_interior':  [], 'vw_interior':[], 'lambda_bc':   [],
-            'continuity':  [], 'momentum':   [],
+            'p_interior':  [], 'p_grad':     [], 'vw_interior': [],
+            'lambda_bc':   [], 'continuity': [], 'momentum':    [],
         }
 
     # =========================================================================
@@ -209,9 +220,13 @@ class PINNTrainer:
         bc_pts:   torch.Tensor,
         in_pts:   torch.Tensor,
         out_pts:  torch.Tensor,
+        second_order_graph: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """
         Returns all unweighted loss components.
+
+        second_order_graph: passed to compute_pde_residuals.
+          False during Adam (fast); True during L-BFGS (full momentum gradient).
 
         Forward passes: 4 (was 8 before refactoring)
           #1  compute_pde_residuals(int_pts)  preds_int + u_x reused below
@@ -223,7 +238,7 @@ class PINNTrainer:
         """
         # ── PDE — forward #1 ─────────────────────────────────────────────────
         cont, mx, my, mz, preds_int, u_x = self.physics.compute_pde_residuals(
-            self.model, int_pts
+            self.model, int_pts, second_order_graph=second_order_graph
         )
         l_cont  = torch.mean(cont ** 2)
         l_mom   = torch.mean(mx ** 2 + my ** 2 + mz ** 2)
@@ -234,9 +249,30 @@ class PINNTrainer:
         l_smooth = self._compute_axial_smoothness_loss(u_x)
         l_pos    = self._compute_positivity_loss(preds_int)
 
-        # ── Interior pressure supervision (reuse preds_int — no extra forward) ─
+        # ── Interior pressure VALUES supervision (reuse preds_int) ──────────────
         p_int_exact = self._p_exact(int_pts)
         l_p_int     = torch.mean((preds_int[:, 3:4] - p_int_exact) ** 2)
+
+        # ── Interior pressure GRADIENT supervision ────────────────────────────
+        # Core fix for momentum/continuity violations:
+        # Even when p values ≈ 0.32(L-x), high-frequency oscillations give large
+        # ∂p/∂x errors. Momentum_x = p_x - ν∇²u; if p_x ≠ -0.32 locally,
+        # momentum residual blows up even when the overall shape is correct.
+        # We directly penalize: dp/dx → -p_coeff, dp/dy → 0, dp/dz → 0.
+        # This requires one autograd.grad call (first order, cheap):
+        p_coeff_val = 8.0 * self.physics.nu / self.geometry.radius ** 2
+        gp_int = torch.autograd.grad(
+            preds_int[:, 3:4].sum(), int_pts,
+            create_graph=True, retain_graph=True,
+        )[0]
+        # Clamp gradient values before squaring to prevent NaN under large L-BFGS steps.
+        # L-BFGS can make large parameter updates that temporarily send the model to extreme
+        # regions; clamping the gradient COMPONENTS (not the loss) prevents overflow.
+        l_p_grad = (
+            torch.mean((gp_int[:, 0:1].clamp(-5.0, 5.0) + p_coeff_val) ** 2)
+            + torch.mean(gp_int[:, 1:2].clamp(-5.0, 5.0) ** 2)
+            + torch.mean(gp_int[:, 2:3].clamp(-5.0, 5.0) ** 2)
+        )
 
         # ── Interior v=w=0 supervision (reuse preds_int — no extra forward) ───
         # Wall and inlet BCs enforce v=w=0 at boundaries only. Interior v,w
@@ -271,6 +307,7 @@ class PINNTrainer:
             'smooth':      l_smooth,
             'positivity':  l_pos,
             'p_interior':  l_p_int,
+            'p_grad':      l_p_grad,
             'vw_interior': l_vw_int,
             'continuity':  l_cont,
             'momentum':    l_mom,
@@ -281,26 +318,31 @@ class PINNTrainer:
         losses: Dict[str, torch.Tensor],
         pde_scale: float = 1.0,
         lambda_bc_eff: float = 1.0,
+        use_p_grad: bool = True,
     ) -> torch.Tensor:
         """
-        total = pde_scale * pde_raw
-              + lambda_bc_eff * bc_raw
-              + WEIGHT_RADIAL    * radial
-              + WEIGHT_SMOOTH    * smooth
-              + WEIGHT_POSITIVITY * positivity
+        Weighted loss assembly.
+
+        pde_scale:   ramp (0.02→1.0) × PDE_SCALE_BASE (5.0) = actual NS weight.
+        lambda_bc_eff: Wang-adapted BC weight.
+        use_p_grad:  False in L-BFGS — p_grad uses create_graph=True which causes
+                     NaN under large L-BFGS steps; p_grad is already small by then.
 
         Scaffolding weights are FIXED — not Wang-controlled.
         Wang2021 only adapts lambda_bc (BC vs NS physics balance).
         """
-        return (
-            pde_scale              * losses['pde_raw']
-            + lambda_bc_eff        * losses['bc_raw']
-            + WEIGHT_RADIAL        * losses['radial']
-            + WEIGHT_SMOOTH        * losses['smooth']
-            + WEIGHT_POSITIVITY    * losses['positivity']
-            + WEIGHT_P_INTERIOR    * losses['p_interior']
-            + WEIGHT_VW_INTERIOR   * losses['vw_interior']
+        total = (
+            PDE_SCALE_BASE         * pde_scale     * losses['pde_raw']
+            + lambda_bc_eff                        * losses['bc_raw']
+            + WEIGHT_RADIAL                        * losses['radial']
+            + WEIGHT_SMOOTH                        * losses['smooth']
+            + WEIGHT_POSITIVITY                    * losses['positivity']
+            + WEIGHT_P_INTERIOR                    * losses['p_interior']
+            + WEIGHT_VW_INTERIOR                   * losses['vw_interior']
         )
+        if use_p_grad:
+            total = total + WEIGHT_P_GRAD * losses['p_grad']
+        return total
 
     # =========================================================================
     # WANG ET AL. 2021 — ADAPTIVE lambda_bc
@@ -535,6 +577,7 @@ class PINNTrainer:
                 self.loss_history['smooth'].append(losses['smooth'].item())
                 self.loss_history['positivity'].append(losses['positivity'].item())
                 self.loss_history['p_interior'].append(losses['p_interior'].item())
+                self.loss_history['p_grad'].append(losses['p_grad'].item())
                 self.loss_history['vw_interior'].append(losses['vw_interior'].item())
                 self.loss_history['lambda_bc'].append(self.lambda_bc)
                 self.loss_history['continuity'].append(losses['continuity'].item())
@@ -547,6 +590,7 @@ class PINNTrainer:
                         f"pde={losses['pde_raw'].item():.3e}  "
                         f"bc={losses['bc_raw'].item():.3e}  "
                         f"p_int={losses['p_interior'].item():.3e}  "
+                        f"p_grad={losses['p_grad'].item():.3e}  "
                         f"vw={losses['vw_interior'].item():.3e}  "
                         f"rad={losses['radial'].item():.3e}  "
                         f"lbc={self.lambda_bc:.3f}(eff={lbc_eff:.2f})  "
@@ -584,13 +628,11 @@ class PINNTrainer:
             line_search_fn='strong_wolfe',
         )
 
-        # L-BFGS uses LARGER fixed batches than Adam:
-        #   Adam uses small batches (4000) refreshed every 20 steps → stochastic, explores
-        #   L-BFGS uses large fixed batches → deterministic, refines; larger = less overfitting
-        # 10000 interior + 2000 BC: covers the cylindrical domain more uniformly,
-        # prevents the model from overfitting the 4000 Adam points and failing generalisation.
-        lbfgs_int = int(os.environ.get('LBFGS_INT', '10000'))
-        lbfgs_bc  = int(os.environ.get('LBFGS_BC',  '2000'))
+        # L-BFGS batch size: with second_order_graph=True the full momentum
+        # equation graph is built, which is ~14s/iter at 10000 points (too slow).
+        # 4000 interior keeps each iteration ~5s while still covering the domain.
+        lbfgs_int = int(os.environ.get('LBFGS_INT', '4000'))
+        lbfgs_bc  = int(os.environ.get('LBFGS_BC',  '1000'))
         logger.info(
             f"  L-BFGS batch: interior={lbfgs_int}  BC={lbfgs_bc}"
             f"  (Adam used {batch_size_int}/{batch_size_bc})"
@@ -606,9 +648,15 @@ class PINNTrainer:
         def closure() -> torch.Tensor:
             iters[0] += 1
             lbfgs_opt.zero_grad()
-            ls  = self._physics_loss(int_f, bc_f, in_f, out_f)
+            # second_order_graph=True: full momentum equation (incl. ν∇²u) is
+            # differentiable here, so L-BFGS can drive momentum residual → 0.
+            ls  = self._physics_loss(int_f, bc_f, in_f, out_f,
+                                     second_order_graph=True)
+            # use_p_grad=True: gp_int values are now clamped to [-5,5] before
+            # squaring, preventing NaN under large L-BFGS steps.
             los = self._total_loss(ls, pde_scale=1.0,
-                                   lambda_bc_eff=lambda_bc_frozen)
+                                   lambda_bc_eff=lambda_bc_frozen,
+                                   use_p_grad=True)
             los.backward()
             torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(), max_norm=1.0

@@ -145,7 +145,7 @@ def run_simulation(
     radius: float,
     length: float,
     adam_epochs: int = 4000,
-    lbfgs_epochs: int = 3000,
+    lbfgs_epochs: int = 400,
     batch_size_int: int = 4000,
     batch_size_bc: int = 800,
     warmup_epochs: int = 500,
@@ -300,7 +300,7 @@ def main():
 
     # Training schedule
     adam_epochs   = int(os.environ.get('ADAM_EPOCHS',   '4000'))   # 500 warmup + 3500 physics
-    lbfgs_epochs  = int(os.environ.get('LBFGS_EPOCHS',  '3000'))   # full refinement
+    lbfgs_epochs  = int(os.environ.get('LBFGS_EPOCHS',  '400'))    # full 2nd-order graph → fewer iters needed (~5s/iter)
     warmup_epochs = int(os.environ.get('WARMUP_EPOCHS', '500'))
 
     # Batching

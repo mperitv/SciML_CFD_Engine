@@ -14,7 +14,13 @@ class PINN3DEngine(nn.Module):
         
         self.embedding = MultiScaleFourierEmbedding(
             in_features=3,
-            sigma_list=[1.0, 5.0, 10.0],
+            sigma_list=[0.5, 1.0, 2.0],   # was [1.0, 5.0, 10.0]
+            # Laminar Poiseuille flow is smooth (polynomial u=2(1-r²/R²)).
+            # High σ=10 allowed high-frequency noise that made |dv/dy|≈0.4 and
+            # |dw/dz|≈0.4, driving ∇·u=0.32 even when shape was perfect (R²=0.999).
+            # σ=[0.5,1,2] limits spatial frequencies to ~4 rad/unit (physical),
+            # which is more than enough for the quadratic Poiseuille profile.
+            # This forces smooth, low-frequency v and w → small dv/dy, dw/dz → ∇·u≈0.
             frequencies_per_scale=64
         )
         
