@@ -116,6 +116,21 @@ WANG_ALPHA:       float = 0.1
 INTERIOR_RESAMPLE_FREQ: int   = 20
 PDE_RAMP_STEPS:         int   = 100
 PDE_RAMP_START:         float = 0.02
+PHYSICS_LOG_FREQ:       int   = 50    # compact summary interval (Adam stage)
+PHYSICS_DETAIL_FREQ:    int   = 300   # full dashboard interval (Adam stage)
+WARMUP_LOG_FREQ:        int   = 50
+WARMUP_DETAIL_FREQ:     int   = 250
+
+# physics_eval.py acceptance thresholds (9-criteria audit scorecard)
+AUDIT_PARA_MIN:         float = 0.95
+AUDIT_DIV_L2_MAX:       float = 1e-3
+AUDIT_MONOTON_MIN:      float = 0.90
+AUDIT_SYM_ERR_MAX:      float = 5.0     # percent
+AUDIT_NEG_PCT_MAX:      float = 1.0      # percent
+AUDIT_DS_RATIO_MIN:     float = 0.50
+AUDIT_MOM_RMS_MAX:      float = 0.10
+AUDIT_CONT_RMS_MAX:     float = 0.10
+AUDIT_P_RMS_MAX:        float = 0.05
 
 
 class PINNTrainer:
@@ -209,6 +224,291 @@ class PINNTrainer:
         Reuses preds_int from compute_pde_residuals — no extra forward pass.
         """
         return torch.mean(torch.relu(-preds_int[:, 0:1]) ** 2)
+
+    def _measure_div_rms(self, n_samples: int = 500) -> tuple[float, float, float]:
+        """RMS divergence and field stats from a fresh interior sample (read-only)."""
+        with torch.no_grad():
+            _x = self.geometry.sample_interior(n_samples, self.device)
+        _xc = _x[:, 0:1].clone().requires_grad_(True)
+        _yc = _x[:, 1:2].clone().requires_grad_(True)
+        _zc = _x[:, 2:3].clone().requires_grad_(True)
+        _pred = self.model(torch.cat([_xc, _yc, _zc], dim=1))
+        _u, _v, _w, _p = (
+            _pred[:, 0:1], _pred[:, 1:2], _pred[:, 2:3], _pred[:, 3:4],
+        )
+        _du = torch.autograd.grad(
+            _u.sum(), _xc, create_graph=False, retain_graph=True,
+        )[0]
+        _dv = torch.autograd.grad(
+            _v.sum(), _yc, create_graph=False, retain_graph=True,
+        )[0]
+        _dw = torch.autograd.grad(
+            _w.sum(), _zc, create_graph=False, retain_graph=False,
+        )[0]
+        div_rms = (_du + _dv + _dw).pow(2).mean().sqrt().item()
+        u_max = _u.abs().max().item()
+        p_range = (_p.max() - _p.min()).item()
+        return div_rms, u_max, p_range
+
+    def _quick_physics_audit(self, n_cont: int = 400) -> Dict[str, float]:
+        """
+        Lightweight read-only snapshot of the 9 physics_eval.py scorecard metrics.
+        Uses fewer samples than the full audit script; thresholds are identical.
+        """
+        L = self.geometry.length
+        R = self.geometry.radius
+        p_coeff = 8.0 * self.physics.nu / R ** 2
+        dev = self.device
+
+        with torch.no_grad():
+            nx = 80
+            x_cl = torch.linspace(0.0, L, nx, device=dev)
+            cl_pts = torch.stack(
+                [x_cl, torch.zeros_like(x_cl), torch.zeros_like(x_cl)], dim=1,
+            )
+            u_cl = self.model(cl_pts)[:, 0]
+            diffs = u_cl[1:] - u_cl[:-1]
+            n_decrease = int((diffs < -0.01).sum().item())
+            monoton = 1.0 - n_decrease / max(len(diffs), 1)
+            half = nx // 2
+            downstream_ratio = (
+                u_cl[half:].abs().mean().item()
+                / (u_cl[:half].abs().mean().item() + 1e-12)
+            )
+
+            nr = 40
+            r_line = torch.linspace(0.0, R, nr, device=dev)
+            r2_scores: list[float] = []
+            for x_st in (L * 0.25, L * 0.5, L * 0.75):
+                rad_pts = torch.stack([
+                    torch.full_like(r_line, x_st), r_line, torch.zeros_like(r_line),
+                ], dim=1)
+                u_r = self.model(rad_pts)[:, 0]
+                u_exact = 2.0 * (1.0 - (r_line / R) ** 2)
+                ss_res = ((u_r - u_exact) ** 2).sum().item()
+                ss_tot = ((u_r - u_r.mean()) ** 2).sum().item()
+                r2_scores.append(max(0.0, 1.0 - ss_res / (ss_tot + 1e-12)))
+            parabolicity = sum(r2_scores) / len(r2_scores)
+
+            r_sym = torch.linspace(0.01, R * 0.99, nr, device=dev)
+            x_mid = L * 0.5
+            pts_pos = torch.stack([
+                torch.full_like(r_sym, x_mid), r_sym, torch.zeros_like(r_sym),
+            ], dim=1)
+            pts_neg = torch.stack([
+                torch.full_like(r_sym, x_mid), -r_sym, torch.zeros_like(r_sym),
+            ], dim=1)
+            u_pos = self.model(pts_pos)[:, 0]
+            u_neg = self.model(pts_neg)[:, 0]
+            sym_err = (
+                100.0 * (u_pos - u_neg).abs().mean().item()
+                / (u_pos.abs().mean().item() + 1e-12)
+            )
+
+            int_pts = self.geometry.sample_interior(800, dev)
+            u_int = self.model(int_pts)[:, 0]
+            neg_pct = (u_int < 0.0).float().mean().item() * 100.0
+            u_max = u_int.abs().max().item()
+
+            xp = torch.linspace(0.0, L, 50, device=dev)
+            p_pts = torch.stack(
+                [xp, torch.zeros_like(xp), torch.zeros_like(xp)], dim=1,
+            )
+            p_pred = self.model(p_pts)[:, 3]
+            p_exact = p_coeff * (L - xp)
+            p_rms = ((p_pred - p_exact) ** 2).mean().sqrt().item()
+            p_range = (p_pred.max() - p_pred.min()).item()
+
+        int_g = self.geometry.sample_interior(n_cont, dev).clone().requires_grad_(True)
+        cont, mx, my, mz, _, _ = self.physics.compute_pde_residuals(
+            self.model, int_g,
+        )
+        cont_rms = cont.pow(2).mean().sqrt().item()
+        mom_rms = torch.sqrt(mx ** 2 + my ** 2 + mz ** 2).pow(2).mean().sqrt().item()
+
+        div_l2, _, _ = self._measure_div_rms(n_samples=n_cont)
+
+        checks = {
+            'para': parabolicity > AUDIT_PARA_MIN,
+            'div':  div_l2 < AUDIT_DIV_L2_MAX,
+            'mono': monoton > AUDIT_MONOTON_MIN,
+            'sym':  sym_err < AUDIT_SYM_ERR_MAX,
+            'neg':  neg_pct < AUDIT_NEG_PCT_MAX,
+            'ds':   downstream_ratio > AUDIT_DS_RATIO_MIN,
+            'mom':  mom_rms < AUDIT_MOM_RMS_MAX,
+            'cont': cont_rms < AUDIT_CONT_RMS_MAX,
+            'pres': p_rms < AUDIT_P_RMS_MAX,
+        }
+        return {
+            'parabolicity': parabolicity,
+            'div_l2': div_l2,
+            'monoton': monoton,
+            'sym_err': sym_err,
+            'neg_pct': neg_pct,
+            'downstream_ratio': downstream_ratio,
+            'mom_rms': mom_rms,
+            'cont_rms': cont_rms,
+            'p_rms': p_rms,
+            'u_max': u_max,
+            'p_range': p_range,
+            'checks': checks,
+            'n_pass': sum(checks.values()),
+        }
+
+    @staticmethod
+    def _audit_tag(ok: bool) -> str:
+        return 'P' if ok else 'F'
+
+    def _log_audit_scorecard(self, audit: Dict) -> None:
+        c = audit['checks']
+        logger.info(
+            f" Audit       {audit['n_pass']}/9 | "
+            f"para={audit['parabolicity']:.3f}[{self._audit_tag(c['para'])}]  "
+            f"div={audit['div_l2']:.2e}[{self._audit_tag(c['div'])}]  "
+            f"mono={audit['monoton']:.2f}[{self._audit_tag(c['mono'])}]  "
+            f"sym={audit['sym_err']:.1f}%[{self._audit_tag(c['sym'])}]  "
+            f"neg={audit['neg_pct']:.2f}%[{self._audit_tag(c['neg'])}]"
+        )
+        logger.info(
+            f"             "
+            f"ds={audit['downstream_ratio']:.2f}[{self._audit_tag(c['ds'])}]  "
+            f"mom={audit['mom_rms']:.3f}[{self._audit_tag(c['mom'])}]  "
+            f"cont={audit['cont_rms']:.3f}[{self._audit_tag(c['cont'])}]  "
+            f"pres={audit['p_rms']:.4f}[{self._audit_tag(c['pres'])}]  "
+            f"(P=pass F=fail, thresholds=physics_eval.py)"
+        )
+
+    @staticmethod
+    def _progress_bar(current: int, total: int, width: int = 24) -> str:
+        pct = min(1.0, current / max(total, 1))
+        filled = int(width * pct)
+        bar = "=" * filled + (">" if filled < width else "") + "." * max(0, width - filled - 1)
+        return f"[{bar}] {current}/{total} ({100 * pct:.0f}%)"
+
+    def _log_warmup_compact(
+        self,
+        epoch: int,
+        warmup_epochs: int,
+        loss: float,
+        u_mae: float,
+        p_mae: float,
+        elapsed: float,
+        lr: float,
+    ) -> None:
+        logger.info(
+            f" WarmUp {epoch:4d}/{warmup_epochs} | "
+            f"loss={loss:.3e}  u_MAE={u_mae:.4f}  p_MAE={p_mae:.4f} | "
+            f"lr={lr:.2e}  {elapsed:.1f}s"
+        )
+
+    def _log_warmup_detail(
+        self,
+        epoch: int,
+        warmup_epochs: int,
+        loss: float,
+        u_mae: float,
+        p_mae: float,
+        elapsed: float,
+        lr: float,
+    ) -> None:
+        bar = "-" * 70
+        p_coeff = 8.0 * self.physics.nu / self.geometry.radius ** 2
+        logger.info(bar)
+        logger.info(
+            f" WarmUp {epoch:4d}/{warmup_epochs}  |  {elapsed:.1f}s elapsed  |  "
+            f"lr={lr:.2e}"
+        )
+        logger.info(bar)
+        logger.info(f" {self._progress_bar(epoch, warmup_epochs)}")
+        logger.info(
+            f" Fit         loss={loss:.3e}  u_MAE={u_mae:.4f}  p_MAE={p_mae:.4f}"
+        )
+        logger.info(
+            f" Target      u = 2(1-r²/R²)  max=2.0  |  "
+            f"p = {p_coeff:.4f}*(L-x)"
+        )
+        logger.info(
+            f" Stage       analytical supervision (no PDE / BC yet)"
+        )
+        logger.info(bar)
+
+    def _log_physics_compact(
+        self,
+        step: int,
+        physics_epochs: int,
+        elapsed: float,
+        ms_per_step: float,
+        lr: float,
+        lbc: float,
+        lbc_eff: float,
+        pde_scale: float,
+        total_loss: torch.Tensor,
+        losses: Dict[str, torch.Tensor],
+    ) -> None:
+        logger.info(
+            f" Physics {step:4d}/{physics_epochs} | "
+            f"tot={total_loss.item():.3e}  pde={losses['pde_raw'].item():.3e}  "
+            f"bc={losses['bc_raw'].item():.3e} | "
+            f"cont={losses['continuity'].item():.2e}  "
+            f"mx={losses['mom_x'].item():.2e} | "
+            f"lbc={lbc:.1f}(eff={lbc_eff:.1f})  ramp={pde_scale:.2f} | "
+            f"{ms_per_step:.0f}ms  {elapsed:.0f}s"
+        )
+
+    def _log_physics_dashboard(
+        self,
+        step: int,
+        physics_epochs: int,
+        elapsed: float,
+        ms_per_step: float,
+        lr: float,
+        lbc: float,
+        lbc_eff: float,
+        pde_scale: float,
+        total_loss: torch.Tensor,
+        losses: Dict[str, torch.Tensor],
+        div_rms: float,
+        u_max: float,
+        p_range: float,
+        audit: Optional[Dict] = None,
+    ) -> None:
+        div_ok = div_rms < AUDIT_DIV_L2_MAX
+        mx = losses['mom_x'].item()
+        my = losses['mom_y'].item()
+        mz = losses['mom_z'].item()
+        bar = "-" * 70
+        logger.info(bar)
+        logger.info(
+            f" STEP {step:4d} | Physics Adam {step:4d}/{physics_epochs} "
+            f"| {elapsed:.1f}s elapsed | {ms_per_step:.0f} ms/step"
+        )
+        logger.info(bar)
+        logger.info(
+            f" Optimizer   lr={lr:.2e}  lambda_bc={lbc:.2f} (eff={lbc_eff:.2f})  "
+            f"pde_ramp={pde_scale:.3f}"
+        )
+        logger.info(
+            f" Loss        total={total_loss.item():.3e}  "
+            f"pde_raw={losses['pde_raw'].item():.3e}  "
+            f"bc_raw={losses['bc_raw'].item():.3e}"
+        )
+        logger.info(
+            f" PDE         cont={losses['continuity'].item():.3e}  "
+            f"mom_x={mx:.3e}  mom_y={my:.3e}  mom_z={mz:.3e}"
+        )
+        logger.info(
+            f" Scaffolding p_grad={losses['p_grad'].item():.3e}  "
+            f"v/w_int={losses['vw_interior'].item():.3e}  "
+            f"radial={losses['radial'].item():.3e}"
+        )
+        logger.info(
+            f" Physics     div_rms={div_rms:.4e}  "
+            f"[{'PASS' if div_ok else 'FAIL'}] (target < 1e-3)  "
+            f"u_max={u_max:.4f}  p_range={p_range:.3e}"
+        )
+        if audit is not None:
+            self._log_audit_scorecard(audit)
+        logger.info(bar)
 
     # =========================================================================
     # PHYSICS LOSS ASSEMBLY
@@ -311,6 +611,9 @@ class PINNTrainer:
             'vw_interior': l_vw_int,
             'continuity':  l_cont,
             'momentum':    l_mom,
+            'mom_x':       torch.mean(mx ** 2),
+            'mom_y':       torch.mean(my ** 2),
+            'mom_z':       torch.mean(mz ** 2),
         }
 
     def _total_loss(
@@ -464,7 +767,12 @@ class PINNTrainer:
             wu_sched.step()
             self.loss_history['warmup'].append(wu_loss.item())
 
-            if epoch % 50 == 0 or epoch == 1:
+            _wu_log = (
+                epoch == 1
+                or epoch % WARMUP_LOG_FREQ == 0
+                or epoch == warmup_epochs
+            )
+            if _wu_log:
                 with torch.no_grad():
                     u_mae = torch.mean(
                         torch.abs(preds[:, 0:1] - self._u_exact(int_pts))
@@ -472,15 +780,26 @@ class PINNTrainer:
                     p_mae = torch.mean(
                         torch.abs(preds[:, 3:4] - self._p_exact(int_pts))
                     ).item()
-                logger.info(
-                    f"[WarmUp] {epoch:4d}/{warmup_epochs}  "
-                    f"loss={wu_loss.item():.3e}  "
-                    f"u_MAE={u_mae:.4f}  p_MAE={p_mae:.4f}  "
-                    f"t={_time.time()-t0:.1f}s"
+                wu_lr = self.adam_optimizer.param_groups[0]['lr']
+                wu_el = _time.time() - t0
+                _wu_detail = (
+                    epoch == 1
+                    or epoch % WARMUP_DETAIL_FREQ == 0
+                    or epoch == warmup_epochs
                 )
+                if _wu_detail:
+                    self._log_warmup_detail(
+                        epoch, warmup_epochs, wu_loss.item(),
+                        u_mae, p_mae, wu_el, wu_lr,
+                    )
+                else:
+                    self._log_warmup_compact(
+                        epoch, warmup_epochs, wu_loss.item(),
+                        u_mae, p_mae, wu_el, wu_lr,
+                    )
 
         wu_dur = _time.time() - t0
-        logger.info(f"WARM-UP COMPLETE  {wu_dur:.1f}s")
+        logger.info(f" WarmUp DONE  {wu_dur:.1f}s  ->  Physics Adam follows")
         os.makedirs("checkpoints", exist_ok=True)
         torch.save(self.model.state_dict(), "checkpoints/warmup_pretrained.pth")
 
@@ -557,15 +876,51 @@ class PINNTrainer:
                 self.adam_optimizer.step()
                 phys_sched.step()
 
-                # Timing diagnostic every 10 steps
-                if self._step % 10 == 0:
+                _log_step = (
+                    self._step == 1
+                    or self._step % PHYSICS_LOG_FREQ == 0
+                )
+                if _log_step:
                     _dt = (
                         (_time.perf_counter() - _timer_ref)
                         / max(self._step - _timer_step_ref, 1) * 1000
                     )
-                    logger.info(
-                        f"[TIMER] step={self._step}  avg_dt={_dt:.0f}ms/step"
+                    _lr = self.adam_optimizer.param_groups[0]['lr']
+                    _detail = (
+                        self._step == 1
+                        or self._step % PHYSICS_DETAIL_FREQ == 0
                     )
+                    if _detail:
+                        _audit = self._quick_physics_audit()
+                        self._log_physics_dashboard(
+                            step=self._step,
+                            physics_epochs=physics_epochs,
+                            elapsed=_time.time() - t1,
+                            ms_per_step=_dt,
+                            lr=_lr,
+                            lbc=self.lambda_bc,
+                            lbc_eff=lbc_eff,
+                            pde_scale=pde_scale,
+                            total_loss=total_loss,
+                            losses=losses,
+                            div_rms=_audit['div_l2'],
+                            u_max=_audit['u_max'],
+                            p_range=_audit['p_range'],
+                            audit=_audit,
+                        )
+                    else:
+                        self._log_physics_compact(
+                            step=self._step,
+                            physics_epochs=physics_epochs,
+                            elapsed=_time.time() - t1,
+                            ms_per_step=_dt,
+                            lr=_lr,
+                            lbc=self.lambda_bc,
+                            lbc_eff=lbc_eff,
+                            pde_scale=pde_scale,
+                            total_loss=total_loss,
+                            losses=losses,
+                        )
                     _timer_ref      = _time.perf_counter()
                     _timer_step_ref = self._step
 
@@ -582,21 +937,6 @@ class PINNTrainer:
                 self.loss_history['lambda_bc'].append(self.lambda_bc)
                 self.loss_history['continuity'].append(losses['continuity'].item())
                 self.loss_history['momentum'].append(losses['momentum'].item())
-
-                if epoch % 50 == 0 or epoch == 1:
-                    logger.info(
-                        f"[Physics] {epoch:4d}/{physics_epochs}  "
-                        f"tot={total_loss.item():.3e}  "
-                        f"pde={losses['pde_raw'].item():.3e}  "
-                        f"bc={losses['bc_raw'].item():.3e}  "
-                        f"p_int={losses['p_interior'].item():.3e}  "
-                        f"p_grad={losses['p_grad'].item():.3e}  "
-                        f"vw={losses['vw_interior'].item():.3e}  "
-                        f"rad={losses['radial'].item():.3e}  "
-                        f"lbc={self.lambda_bc:.3f}(eff={lbc_eff:.2f})  "
-                        f"ramp={pde_scale:.3f}  "
-                        f"t={_time.time()-t1:.1f}s"
-                    )
 
                 if epoch % 200 == 0:
                     ckpt = f"checkpoints/physics_adam_{epoch}.pth"
